@@ -33,7 +33,7 @@ var multiValueFilters = map[string]struct{}{
 	// Add others like 'instance-state-name' etc. if needed
 }
 
-func buildEC2Filters(genericFilters map[string]string) []types.Filter {
+func BuildEC2Filters(genericFilters map[string]string) []types.Filter {
 	ec2Filters := make([]types.Filter, 0, len(genericFilters)+1) // +1 for default state filter
 	processedFilterNames := make(map[string]struct{})            // Track filters added to handle overrides
 
@@ -52,11 +52,11 @@ func buildEC2Filters(genericFilters map[string]string) []types.Filter {
 			// Check if this filter supports multiple values based on our list
 			// and split the input value if it does.
 			if _, supportsMulti := multiValueFilters[filterName]; supportsMulti {
-				filterValues = splitFilterValue(value)
+				filterValues = SplitFilterValue(value)
 			}
 		} else if key == domain.ComputeSecurityGroupsKey {
 			// Special handling for security groups - needs multiple filters
-			sgIDs := splitFilterValue(value)
+			sgIDs := SplitFilterValue(value)
 			sgFilterName := "instance.group-id"
 			for _, sgID := range sgIDs {
 				if sgID != "" {
@@ -68,6 +68,9 @@ func buildEC2Filters(genericFilters map[string]string) []types.Filter {
 			}
 			processedFilterNames[sgFilterName] = struct{}{} // Mark as processed
 			continue                                        // Skip adding the main filter below for this key
+		} else if key == "instance-state-name" {
+			filterName = key
+			filterValues = SplitFilterValue(value)
 		} else {
 			// Key is not a tag and not explicitly mapped, ignore it.
 			// TODO: Add logging here for ignored filter keys?
@@ -91,7 +94,6 @@ func buildEC2Filters(genericFilters map[string]string) []types.Filter {
 			Name:   &stateFilterName,
 			Values: []string{"pending", "running", "shutting-down", "stopping", "stopped"},
 		})
-		processedFilterNames[stateFilterName] = struct{}{} // Mark as processed
 	}
 
 	if len(ec2Filters) == 0 {
@@ -100,8 +102,8 @@ func buildEC2Filters(genericFilters map[string]string) []types.Filter {
 	return ec2Filters
 }
 
-// splitFilterValue handles comma-separated values for filters that support multiple values.
-func splitFilterValue(value string) []string {
+// SplitFilterValue handles comma-separated values for filters that support multiple values.
+func SplitFilterValue(value string) []string {
 	if !strings.Contains(value, ",") {
 		return []string{value}
 	}

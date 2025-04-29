@@ -12,6 +12,26 @@ import (
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 )
 
+var ec2ClientFactory func(aws.Config) interface{}
+var ec2VolumeClientFactory func(aws.Config) interface{}
+
+func SetEC2ClientFactory(factory func(aws.Config) interface{}) {
+	ec2ClientFactory = factory
+}
+
+func SetEC2VolumeClientFactory(factory func(aws.Config) interface{}) {
+	ec2VolumeClientFactory = factory
+}
+
+// Define interfaces for AWS clients to make mocking easier
+type DescribeInstanceAttributeClient interface {
+	DescribeInstanceAttribute(ctx context.Context, params *awsec2.DescribeInstanceAttributeInput, optFns ...func(*awsec2.Options)) (*awsec2.DescribeInstanceAttributeOutput, error)
+}
+
+type DescribeVolumesClient interface {
+	DescribeVolumes(ctx context.Context, params *awsec2.DescribeVolumesInput, optFns ...func(*awsec2.Options)) (*awsec2.DescribeVolumesOutput, error)
+}
+
 // ec2InstanceResource struct remains the same
 type ec2InstanceResource struct {
 	meta domain.ResourceMetadata
@@ -26,8 +46,8 @@ func (r *ec2InstanceResource) Attributes() map[string]any {
 	return r.attr
 }
 
-// mapInstanceToDomain maps a single EC2 instance to the domain resource format
-func mapInstanceToDomain(instance types.Instance, region string, accountID string, ctx context.Context, cfg aws.Config) (domain.PlatformResource, error) {
+// MapInstanceToDomain maps a single EC2 instance to the domain resource format
+func MapInstanceToDomain(instance types.Instance, region string, accountID string, ctx context.Context, cfg aws.Config) (domain.PlatformResource, error) {
 	if instance.InstanceId == nil {
 		return nil, errors.New(errors.CodeInternal, "received EC2 instance with nil InstanceId")
 	}
@@ -59,21 +79,29 @@ func mapInstanceToDomain(instance types.Instance, region string, accountID strin
 	// UserData isn't directly available in the Instance struct
 	// We need to make a separate API call to get it
 	if instance.InstanceId != nil {
-		client := awsec2.NewFromConfig(cfg)
-		userDataInput := &awsec2.DescribeInstanceAttributeInput{
-			Attribute:  types.InstanceAttributeNameUserData,
-			InstanceId: instance.InstanceId,
+		var client interface{}
+		if ec2ClientFactory != nil {
+			client = ec2ClientFactory(cfg)
+		} else {
+			client = awsec2.NewFromConfig(cfg)
 		}
-		
-		userDataOutput, err := client.DescribeInstanceAttribute(ctx, userDataInput)
-		if err == nil && userDataOutput.UserData != nil && userDataOutput.UserData.Value != nil {
-			// Successfully retrieved user data
-			encodedUserData := *userDataOutput.UserData.Value
-			decodedUserData, decodeErr := base64.StdEncoding.DecodeString(encodedUserData)
-			if decodeErr != nil {
-				attrs[domain.ComputeUserDataKey] = encodedUserData
-			} else {
-				attrs[domain.ComputeUserDataKey] = string(decodedUserData)
+
+		if attrClient, ok := client.(DescribeInstanceAttributeClient); ok {
+			userDataInput := &awsec2.DescribeInstanceAttributeInput{
+				Attribute:  types.InstanceAttributeNameUserData,
+				InstanceId: instance.InstanceId,
+			}
+
+			userDataOutput, err := attrClient.DescribeInstanceAttribute(ctx, userDataInput)
+			if err == nil && userDataOutput.UserData != nil && userDataOutput.UserData.Value != nil {
+				// Successfully retrieved user data
+				encodedUserData := *userDataOutput.UserData.Value
+				decodedUserData, decodeErr := base64.StdEncoding.DecodeString(encodedUserData)
+				if decodeErr != nil {
+					attrs[domain.ComputeUserDataKey] = encodedUserData
+				} else {
+					attrs[domain.ComputeUserDataKey] = string(decodedUserData)
+				}
 			}
 		}
 	}
@@ -150,7 +178,7 @@ func mapInstanceToDomain(instance types.Instance, region string, accountID strin
 	}, nil
 }
 
-// findBlockDeviceAttrs and mapBlockDeviceAttrs remain the same as before
+// findBlockDeviceAttrs remains the same as before
 func findBlockDeviceAttrs(deviceName string, mappings []types.InstanceBlockDeviceMapping, ctx context.Context, cfg aws.Config) map[string]any {
 	for _, bdm := range mappings {
 		if bdm.DeviceName != nil && *bdm.DeviceName == deviceName && bdm.Ebs != nil {
@@ -173,51 +201,59 @@ func mapBlockDeviceAttrs(bdm types.InstanceBlockDeviceMapping, ctx context.Conte
 		// Safely access fields within ebsSpec
 		if ebsSpec.VolumeId != nil {
 			attrs["volume_id"] = *ebsSpec.VolumeId
-			
+
 			// Make an additional API call to get complete volume information
-			client := awsec2.NewFromConfig(cfg)
-			volumeInput := &awsec2.DescribeVolumesInput{
-				VolumeIds: []string{*ebsSpec.VolumeId},
+			var client interface{}
+			if ec2VolumeClientFactory != nil {
+				client = ec2VolumeClientFactory(cfg)
+			} else {
+				client = awsec2.NewFromConfig(cfg)
 			}
-			
-			volumeOutput, err := client.DescribeVolumes(ctx, volumeInput)
-			if err == nil && len(volumeOutput.Volumes) > 0 {
-				// Successfully retrieved additional volume information
-				volume := volumeOutput.Volumes[0]
-				
-				// Access all the volume attributes we need for drift detection
-				if volume.VolumeType != "" {
-					attrs["volume_type"] = string(volume.VolumeType)
+
+			// Try to use client as volume client
+			if volumeClient, ok := client.(DescribeVolumesClient); ok {
+				volumeInput := &awsec2.DescribeVolumesInput{
+					VolumeIds: []string{*ebsSpec.VolumeId},
 				}
-				
-				if volume.Size != nil {
-					attrs["volume_size"] = *volume.Size
-				}
-				
-				if volume.Iops != nil {
-					attrs["iops"] = *volume.Iops
-				}
-				
-				if volume.Throughput != nil {
-					attrs["throughput"] = *volume.Throughput
-				}
-				
-				if volume.Encrypted != nil {
-					attrs["encrypted"] = *volume.Encrypted
-				}
-				
-				if volume.KmsKeyId != nil {
-					attrs["kms_key_id"] = *volume.KmsKeyId
-				}
-				
-				if volume.SnapshotId != nil {
-					attrs["snapshot_id"] = *volume.SnapshotId
+
+				volumeOutput, err := volumeClient.DescribeVolumes(ctx, volumeInput)
+				if err == nil && len(volumeOutput.Volumes) > 0 {
+					// Successfully retrieved volume info
+					volume := volumeOutput.Volumes[0]
+
+					if volume.VolumeType != "" {
+						attrs["volume_type"] = string(volume.VolumeType)
+					}
+
+					if volume.Size != nil {
+						attrs["volume_size"] = *volume.Size
+					}
+
+					if volume.Iops != nil {
+						attrs["iops"] = *volume.Iops
+					}
+
+					if volume.Throughput != nil {
+						attrs["throughput"] = *volume.Throughput
+					}
+
+					if volume.Encrypted != nil {
+						attrs["encrypted"] = *volume.Encrypted
+					}
+
+					if volume.KmsKeyId != nil {
+						attrs["kms_key_id"] = *volume.KmsKeyId
+					}
+
+					if volume.SnapshotId != nil {
+						attrs["snapshot_id"] = *volume.SnapshotId
+					}
 				}
 			}
 			// If API call failed, we'll still have the basic volume_id,
 			// but will miss the detailed attributes
 		}
-		
+
 		if ebsSpec.DeleteOnTermination != nil {
 			attrs["delete_on_termination"] = *ebsSpec.DeleteOnTermination
 		}

@@ -48,6 +48,20 @@ func NewProvider(ctx context.Context, logger ports.Logger) (*Provider, error) {
 	return p, nil
 }
 
+func NewProviderWithHandlers(cfg aws.Config, logger ports.Logger, handlers ...AWSResourceHandler) *Provider {
+	p := &Provider{
+		awsConfig: cfg,
+		handlers:  make(map[domain.ResourceKind]AWSResourceHandler),
+		logger:    logger,
+	}
+
+	for _, handler := range handlers {
+		p.registerHandler(handler)
+	}
+
+	return p
+}
+
 // registerHandler remains the same
 func (p *Provider) registerHandler(handler AWSResourceHandler) {
 	// ... implementation ... // (Same as before)
