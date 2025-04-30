@@ -3,13 +3,16 @@ package app
 import (
 	"context"
 	"fmt"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/util"
 	"os"
 	"strings"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/spf13/viper"
 
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/matching/tag"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfstate"
 	"github.com/olusolaa/infra-drift-detector/internal/config"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
@@ -44,7 +47,7 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 	if v.ConfigFileUsed() != "" {
 		logger.Debugf(ctx, "Using configuration file: %s", v.ConfigFileUsed())
 	} else {
-		logger.Debugf(ctx, "No configuration file found, using defaults, env vars, and flags.")
+		logger.Debugf(ctx, "No configuration file found, using defaults/env/flags.")
 	}
 
 	attributesOverrideStr := v.GetString("attributes")
@@ -56,43 +59,69 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 			for i, r := range cfg.Resources {
 				existingResources[r.Kind] = i
 			}
-
 			for kind, attrs := range overrideMap {
 				if index, exists := existingResources[kind]; exists {
 					logger.Debugf(ctx, "Overriding attributes for kind '%s' with: %v", kind, attrs)
 					cfg.Resources[index].Attributes = attrs
 				} else {
-					logger.Warnf(ctx, "Attribute override specified for kind '%s', but this kind is not defined in the 'resources' configuration section. Ignoring override.", kind)
+					logger.Warnf(ctx, "Ignoring attribute override for undefined kind '%s'", kind)
 				}
 			}
 		}
 	}
 
+	validate := validator.New(validator.WithRequiredStructEnabled())
+	err = validate.StructCtx(ctx, cfg)
+	if err != nil {
+		var errorDetails strings.Builder
+		errorDetails.WriteString("Configuration validation failed:")
+		validationErrors := err.(validator.ValidationErrors)
+		for _, fe := range validationErrors {
+			errorDetails.WriteString(fmt.Sprintf("\n - Field '%s': Failed on '%s' validation (value: '%v')", fe.Namespace(), fe.Tag(), fe.Value()))
+		}
+		wrappedErr := errors.NewUserFacing(errors.CodeConfigValidation, errorDetails.String(), "Please check your configuration file or flags.")
+		logger.Errorf(ctx, wrappedErr, "Configuration validation failed")
+		return nil, wrappedErr
+	}
+	logger.Debugf(ctx, "Configuration validated successfully")
+
 	registry := service.NewComponentRegistry()
 	logger.Debugf(ctx, "Component registry initialized")
 
 	var stateProvider ports.StateProvider
-	if cfg.State.TFState != nil {
+	switch cfg.State.ProviderType {
+	case tfstate.ProviderTypeTFState:
+		provLog := logger.WithFields(map[string]any{"provider": tfstate.ProviderTypeTFState})
 		stateProvider, err = tfstate.NewProvider(*cfg.State.TFState)
 		if err != nil {
-			return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to initialize Terraform State provider")
+			return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to initialize TFState provider")
 		}
-		if err = registry.RegisterStateProvider(stateProvider); err != nil {
-			return nil, err
+		provLog.Infof(ctx, "Using TFState provider: %s", cfg.State.TFState.FilePath)
+	case tfhcl.ProviderTypeTFHCL:
+		provLog := logger.WithFields(map[string]any{"provider": tfhcl.ProviderTypeTFHCL})
+		stateProvider, err = tfhcl.NewProvider(*cfg.State.TFHCL, provLog)
+		if err != nil {
+			return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to initialize TFHCL provider")
 		}
-	} else {
-		return nil, errors.NewUserFacing(errors.CodeConfigValidation, "no supported state provider configured", "Configure state.tfstate section.")
+		provLog.Infof(ctx, "Using TFHCL provider: %s (Workspace: %s)", cfg.State.TFHCL.Directory, cfg.State.TFHCL.Workspace)
+	default:
+		return nil, errors.NewUserFacing(errors.CodeConfigValidation, fmt.Sprintf("invalid state provider type: %s", cfg.State.ProviderType), "")
+	}
+	if err = registry.RegisterStateProvider(stateProvider); err != nil {
+		return nil, err
 	}
 
 	var platformProvider ports.PlatformProvider
 	if cfg.Platform.AWS != nil {
-		platformProvider, err = aws.NewProvider(ctx, logger.WithFields(map[string]any{"provider": "aws"}))
+		provLog := logger.WithFields(map[string]any{"provider": util.ProviderTypeAWS})
+		platformProvider, err = aws.NewProvider(ctx, cfg, provLog)
 		if err != nil {
-			return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to initialize AWS platform provider")
+			return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to initialize AWS provider")
 		}
 		if err = registry.RegisterPlatformProvider(platformProvider); err != nil {
 			return nil, err
 		}
+		provLog.Infof(ctx, "Using AWS platform provider")
 	} else {
 		return nil, errors.NewUserFacing(errors.CodeConfigValidation, "no supported platform provider configured", "Configure platform.aws section.")
 	}
@@ -100,29 +129,30 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 	var matcher ports.Matcher
 	switch cfg.Settings.MatcherType {
 	case tag.MatcherTypeTag:
-		if cfg.Settings.Matcher.Tag == nil {
-			return nil, errors.NewUserFacing(errors.CodeConfigValidation, "tag matcher selected but 'matcher_config.tag' section is missing", "Add matcher_config.tag.key.")
-		}
-		matcher, err = tag.NewMatcher(*cfg.Settings.Matcher.Tag, logger.WithFields(map[string]any{"component": "matcher"}))
+		matchLog := logger.WithFields(map[string]any{"component": "matcher", "type": tag.MatcherTypeTag})
+		matcher, err = tag.NewMatcher(*cfg.Settings.Matcher.Tag, matchLog)
 		if err != nil {
 			return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to initialize Tag matcher")
 		}
+		matchLog.Infof(ctx, "Using Tag matcher with key: %s", cfg.Settings.Matcher.Tag.TagKey)
 	default:
-		return nil, errors.NewUserFacing(errors.CodeConfigValidation, fmt.Sprintf("unsupported matcher type: %s", cfg.Settings.MatcherType), "Supported matchers: tag")
+		return nil, errors.NewUserFacing(errors.CodeConfigValidation, fmt.Sprintf("unsupported matcher type: %s", cfg.Settings.MatcherType), "Supported: tag")
 	}
 
 	var reporter ports.Reporter
 	switch cfg.Settings.ReporterType {
 	case text.ReporterTypeText:
+		reportLog := logger.WithFields(map[string]any{"component": "reporter", "type": text.ReporterTypeText})
 		if cfg.Settings.Reporter.Text == nil {
 			cfg.Settings.Reporter.Text = config.DefaultConfig().Settings.Reporter.Text
 		}
-		reporter, err = text.NewReporter(*cfg.Settings.Reporter.Text, logger.WithFields(map[string]any{"component": "reporter"}))
+		reporter, err = text.NewReporter(*cfg.Settings.Reporter.Text, reportLog)
 		if err != nil {
 			return nil, errors.Wrap(err, errors.CodeInternal, "failed to initialize Text reporter")
 		}
+		reportLog.Infof(ctx, "Using Text reporter (Color: %t)", !cfg.Settings.Reporter.Text.NoColor)
 	default:
-		return nil, errors.NewUserFacing(errors.CodeConfigValidation, fmt.Sprintf("unsupported reporter type: %s", cfg.Settings.ReporterType), "Supported reporters: text")
+		return nil, errors.NewUserFacing(errors.CodeConfigValidation, fmt.Sprintf("unsupported reporter type: %s", cfg.Settings.ReporterType), "Supported: text")
 	}
 
 	logger.Debugf(ctx, "Registering resource comparers")
@@ -142,11 +172,7 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 	}
 
 	logger.Infof(ctx, "Application bootstrap complete")
-	return &Application{
-		Engine: engine,
-		Logger: logger,
-		Config: cfg,
-	}, nil
+	return &Application{Engine: engine, Logger: logger, Config: cfg}, nil
 }
 
 func parseAttributesOverride(override string) map[domain.ResourceKind][]string {

@@ -3,6 +3,7 @@ package ec2_test
 import (
 	"context"
 	"errors"
+	awstypes "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/util"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -12,7 +13,6 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	ec2adapter "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/ec2"
-	awstypes "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/types"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/mocks"
 )

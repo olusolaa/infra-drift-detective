@@ -14,7 +14,7 @@ import (
 const ProviderTypeTFState = "tfstate"
 
 type Provider struct {
-	filePath string
+	filePath    string
 	parsedState *terraformjson.State
 	stateMutex  sync.RWMutex
 	parseErr    error
@@ -60,6 +60,11 @@ func (p *Provider) ensureStateParsed(ctx context.Context) (*terraformjson.State,
 		return nil, p.parseErr
 	}
 
+	// Check context cancellation before parsing state file
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	parsed, err := parseStateFile(p.filePath)
 	if err != nil {
 		p.parseErr = err
@@ -70,6 +75,11 @@ func (p *Provider) ensureStateParsed(ctx context.Context) (*terraformjson.State,
 }
 
 func (p *Provider) ListResources(ctx context.Context, kind domain.ResourceKind) ([]domain.StateResource, error) {
+	// Check context cancellation first
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	state, err := p.ensureStateParsed(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, errors.CodeStateReadError, "failed to ensure state file is parsed")
@@ -99,6 +109,11 @@ func (p *Provider) ListResources(ctx context.Context, kind domain.ResourceKind) 
 }
 
 func (p *Provider) GetResource(ctx context.Context, kind domain.ResourceKind, identifier string) (domain.StateResource, error) {
+	// Check context cancellation first
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	state, err := p.ensureStateParsed(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, errors.CodeStateReadError, "failed to ensure state file is parsed")

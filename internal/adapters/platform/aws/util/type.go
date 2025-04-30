@@ -1,3 +1,3 @@
-package types
+package util
 
 const ProviderTypeAWS = "aws"

@@ -19,6 +19,16 @@ const (
 	CodeTypeAssertionError Code = "TYPE_ASSERTION_ERROR"
 	CodeNotImplemented     Code = "NOT_IMPLEMENTED"
 	CodeTimeout            Code = "TIMEOUT_ERROR"
+
+	// HCL specific error codes
+	CodeHCLParseError       Code = "HCL_PARSE_ERROR"
+	CodeHCLEvalError        Code = "HCL_EVAL_ERROR"
+	CodeHCLAttributeError   Code = "HCL_ATTRIBUTE_ERROR"
+	CodeHCLVariableError    Code = "HCL_VARIABLE_ERROR"
+	CodeHCLBlockError       Code = "HCL_BLOCK_ERROR"
+	CodeStateProviderError  Code = "STATE_PROVIDER_ERROR"
+	CodeMappingError        Code = "MAPPING_ERROR"
+	CodeNotImplementedError Code = "NOT_IMPLEMENTED_ERROR"
 	// Add more specific codes as needed
 )
 

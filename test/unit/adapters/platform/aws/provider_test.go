@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	awsadapter "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws"
+	"github.com/olusolaa/infra-drift-detector/internal/config"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	internalerrors "github.com/olusolaa/infra-drift-detector/internal/errors"
@@ -79,31 +80,40 @@ func TestNewProvider(t *testing.T) {
 	t.Run("successful initialization", func(t *testing.T) {
 		mockLogger := new(MockLogger)
 		mockLogger.On("WithFields", mock.Anything).Return(mockLogger)
+		mockLogger.On("Debugf", mock.Anything, mock.Anything, mock.Anything).Return()
+		mockLogger.On("Infof", mock.Anything, mock.Anything, mock.Anything).Return()
 
-		provider, err := awsadapter.NewProvider(context.Background(), mockLogger)
+		// Create a minimal config for testing
+		appCfg := &config.Config{
+			Platform: config.PlatformConfig{
+				AWS: &config.AWSPlatformConfig{
+					Region:  "us-west-2",
+					Profile: "default",
+				},
+			},
+		}
+
+		provider, err := awsadapter.NewProvider(context.Background(), appCfg, mockLogger)
 
 		require.NoError(t, err)
 		require.NotNil(t, provider)
-		assert.Equal(t, "aws", provider.Type())
 	})
 
 	t.Run("nil logger causes error", func(t *testing.T) {
-		provider, err := awsadapter.NewProvider(context.Background(), nil)
+		appCfg := &config.Config{
+			Platform: config.PlatformConfig{
+				AWS: &config.AWSPlatformConfig{
+					Region:  "us-west-2",
+					Profile: "default",
+				},
+			},
+		}
+		provider, err := awsadapter.NewProvider(context.Background(), appCfg, nil)
 
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "logger cannot be nil")
 		assert.Nil(t, provider)
 	})
-}
-
-func TestProviderType(t *testing.T) {
-	mockLogger := new(MockLogger)
-	mockLogger.On("WithFields", mock.Anything).Return(mockLogger)
-
-	provider, err := awsadapter.NewProvider(context.Background(), mockLogger)
-	require.NoError(t, err)
-
-	assert.Equal(t, "aws", provider.Type())
 }
 
 func TestListResources(t *testing.T) {

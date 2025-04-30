@@ -3,260 +3,403 @@ package ec2
 import (
 	"context"
 	"encoding/base64"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/util"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
-	awstypes "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/types"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
+	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 )
 
-var ec2ClientFactory func(aws.Config) interface{}
-var ec2VolumeClientFactory func(aws.Config) interface{}
-
-func SetEC2ClientFactory(factory func(aws.Config) interface{}) {
-	ec2ClientFactory = factory
-}
-
-func SetEC2VolumeClientFactory(factory func(aws.Config) interface{}) {
-	ec2VolumeClientFactory = factory
-}
-
-// Define interfaces for AWS clients to make mocking easier
-type DescribeInstanceAttributeClient interface {
-	DescribeInstanceAttribute(ctx context.Context, params *awsec2.DescribeInstanceAttributeInput, optFns ...func(*awsec2.Options)) (*awsec2.DescribeInstanceAttributeOutput, error)
-}
-
-type DescribeVolumesClient interface {
-	DescribeVolumes(ctx context.Context, params *awsec2.DescribeVolumesInput, optFns ...func(*awsec2.Options)) (*awsec2.DescribeVolumesOutput, error)
-}
-
-// ec2InstanceResource struct remains the same
+// ec2InstanceResource implements domain.PlatformResource with lazy loading for attributes.
 type ec2InstanceResource struct {
-	meta domain.ResourceMetadata
-	attr map[string]any
+	mu           sync.RWMutex // Protects lazy-loaded fields and cache
+	meta         domain.ResourceMetadata
+	baseInstance types.Instance
+	awsConfig    aws.Config   // Store config to create clients on demand
+	parentLogger ports.Logger // Logger passed down from handler
+
+	userData        *string
+	userDataErr     error
+	userDataFetched bool // Use simple bool instead of sync.Once for finer lock control
+
+	volumes        map[string]types.Volume
+	volumesErr     error
+	volumesFetched bool // Use simple bool
+
+	attributesCache map[string]any
+	attributesBuilt bool
 }
 
-func (r *ec2InstanceResource) Metadata() domain.ResourceMetadata {
-	return r.meta
-}
-
-func (r *ec2InstanceResource) Attributes() map[string]any {
-	return r.attr
-}
-
-// MapInstanceToDomain maps a single EC2 instance to the domain resource format
-func MapInstanceToDomain(instance types.Instance, region string, accountID string, ctx context.Context, cfg aws.Config) (domain.PlatformResource, error) {
-	if instance.InstanceId == nil {
-		return nil, errors.New(errors.CodeInternal, "received EC2 instance with nil InstanceId")
-	}
-	instanceID := *instance.InstanceId
-
-	attrs := make(map[string]any)
-	tags := make(map[string]string)
-	nameTag := "" // Default empty name
-
-	// --- Map Core Attributes ---
-	attrs[domain.ComputeInstanceTypeKey] = string(instance.InstanceType) // InstanceType is required by API
-
-	if instance.ImageId != nil {
-		attrs[domain.ComputeImageIDKey] = *instance.ImageId
-	}
-	if instance.SubnetId != nil {
-		attrs[domain.ComputeSubnetIDKey] = *instance.SubnetId
-	}
-	if instance.Placement != nil && instance.Placement.AvailabilityZone != nil {
-		attrs[domain.ComputeAvailabilityZoneKey] = *instance.Placement.AvailabilityZone
-	}
-	if instance.IamInstanceProfile != nil && instance.IamInstanceProfile.Arn != nil {
-		// Sometimes only the name is needed, sometimes the ARN. Storing ARN.
-		// Comparer needs to know how TF state represents this (name vs ARN).
-		attrs[domain.ComputeIAMInstanceProfileKey] = *instance.IamInstanceProfile.Arn
+// newEc2InstanceResource creates the resource object, storing necessary info for lazy loading.
+func newEc2InstanceResource(
+	instance types.Instance,
+	cfg aws.Config,
+	region string,
+	accountID string,
+	logger ports.Logger,
+) (*ec2InstanceResource, error) {
+	instanceID := aws.ToString(instance.InstanceId)
+	if instanceID == "" {
+		return nil, errors.New(errors.CodeInternal, "cannot create resource for instance with nil or empty InstanceId")
 	}
 
-	// --- Handle User Data (Decode Base64) ---
-	// UserData isn't directly available in the Instance struct
-	// We need to make a separate API call to get it
-	if instance.InstanceId != nil {
-		var client interface{}
-		if ec2ClientFactory != nil {
-			client = ec2ClientFactory(cfg)
-		} else {
-			client = awsec2.NewFromConfig(cfg)
-		}
-
-		if attrClient, ok := client.(DescribeInstanceAttributeClient); ok {
-			userDataInput := &awsec2.DescribeInstanceAttributeInput{
-				Attribute:  types.InstanceAttributeNameUserData,
-				InstanceId: instance.InstanceId,
-			}
-
-			userDataOutput, err := attrClient.DescribeInstanceAttribute(ctx, userDataInput)
-			if err == nil && userDataOutput.UserData != nil && userDataOutput.UserData.Value != nil {
-				// Successfully retrieved user data
-				encodedUserData := *userDataOutput.UserData.Value
-				decodedUserData, decodeErr := base64.StdEncoding.DecodeString(encodedUserData)
-				if decodeErr != nil {
-					attrs[domain.ComputeUserDataKey] = encodedUserData
-				} else {
-					attrs[domain.ComputeUserDataKey] = string(decodedUserData)
-				}
-			}
-		}
-	}
-
-	// --- Handle Security Groups ---
-	securityGroupIDs := make([]string, 0, len(instance.SecurityGroups))
-	for _, sg := range instance.SecurityGroups {
-		if sg.GroupId != nil {
-			securityGroupIDs = append(securityGroupIDs, *sg.GroupId)
-		}
-	}
-	// Store sorted list for consistent comparison? Comparer should handle order differences.
-	// sort.Strings(securityGroupIDs)
-	attrs[domain.ComputeSecurityGroupsKey] = securityGroupIDs
-
-	// --- Handle Block Devices ---
-	if instance.RootDeviceName != nil && instance.RootDeviceType == types.DeviceTypeEbs {
-		rootDeviceAttrs := findBlockDeviceAttrs(*instance.RootDeviceName, instance.BlockDeviceMappings, ctx, cfg)
-		if rootDeviceAttrs != nil {
-			attrs[domain.ComputeRootBlockDeviceKey] = rootDeviceAttrs
-		}
-	}
-
-	ebsDevicesAttrs := make([]map[string]any, 0, len(instance.BlockDeviceMappings))
-	for _, bdm := range instance.BlockDeviceMappings {
-		// Check if it's an EBS volume and *not* the root device (if root is EBS)
-		if bdm.Ebs != nil && bdm.DeviceName != nil &&
-			(instance.RootDeviceName == nil || *bdm.DeviceName != *instance.RootDeviceName) {
-			deviceAttrs := mapBlockDeviceAttrs(bdm, ctx, cfg)
-			ebsDevicesAttrs = append(ebsDevicesAttrs, deviceAttrs)
-		}
-	}
-	if len(ebsDevicesAttrs) > 0 {
-		// Store sorted list for consistent comparison? Comparer should handle order differences.
-		attrs[domain.ComputeEBSBlockDevicesKey] = ebsDevicesAttrs
-	}
-
-	// --- Handle Tags ---
-	for _, tag := range instance.Tags {
-		if tag.Key != nil && tag.Value != nil {
-			tagKey := *tag.Key
-			tagValue := *tag.Value
-			tags[tagKey] = tagValue
-			if tagKey == "Name" { // Extract standard Name tag
-				nameTag = tagValue
-			}
-		}
-	}
-	attrs[domain.KeyTags] = tags // Store the full tag map
-
-	// --- Set Domain Keys ---
-	attrs[domain.KeyID] = instanceID
-	attrs[domain.KeyName] = nameTag // Use value of 'Name' tag, or "" if not present
-
-	// ARN is less common for EC2 but include if present and needed
-	// instance ARN format: arn:aws:ec2:region:account-id:instance/instance-id
-	// Can construct it if needed, or check if API provides it (it usually doesn't directly on Instance object)
-	// For now, omit unless comparison specifically requires it.
-	// attrs[domain.KeyARN] = constructInstanceARN(region, accountID, instanceID)
-
-	// --- Construct Metadata ---
 	meta := domain.ResourceMetadata{
 		Kind:               domain.KindComputeInstance,
-		ProviderType:       awstypes.ProviderTypeAWS,
+		ProviderType:       util.ProviderTypeAWS,
 		ProviderAssignedID: instanceID,
-		SourceIdentifier:   instanceID, // Use ID as identifier for actual resources
+		SourceIdentifier:   instanceID,
 		Region:             region,
 		AccountID:          accountID,
 	}
-
 	return &ec2InstanceResource{
-		meta: meta,
-		attr: attrs,
+		meta:         meta,
+		baseInstance: instance,
+		awsConfig:    cfg,
+		parentLogger: logger.WithFields(map[string]any{"instance_id": instanceID}), // Pre-add context
 	}, nil
 }
 
-// findBlockDeviceAttrs remains the same as before
-func findBlockDeviceAttrs(deviceName string, mappings []types.InstanceBlockDeviceMapping, ctx context.Context, cfg aws.Config) map[string]any {
-	for _, bdm := range mappings {
-		if bdm.DeviceName != nil && *bdm.DeviceName == deviceName && bdm.Ebs != nil {
-			return mapBlockDeviceAttrs(bdm, ctx, cfg)
-		}
-	}
-	return nil
+func (r *ec2InstanceResource) Metadata() domain.ResourceMetadata {
+	// Metadata is derived from base instance, safe to return directly
+	return r.meta
 }
 
-func mapBlockDeviceAttrs(bdm types.InstanceBlockDeviceMapping, ctx context.Context, cfg aws.Config) map[string]any {
+// Attributes retrieves the full attribute map, triggering lazy loading if needed.
+func (r *ec2InstanceResource) Attributes() map[string]any {
+	r.mu.RLock()
+	// Return cached map if already built
+	if r.attributesBuilt {
+		cacheCopy := make(map[string]any, len(r.attributesCache))
+		for k, v := range r.attributesCache {
+			cacheCopy[k] = v
+		}
+		r.mu.RUnlock()
+		return cacheCopy
+	}
+	r.mu.RUnlock()
+
+	// Acquire write lock to build the map
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Double check if another goroutine built it while waiting
+	if r.attributesBuilt {
+		cacheCopy := make(map[string]any, len(r.attributesCache))
+		for k, v := range r.attributesCache {
+			cacheCopy[k] = v
+		}
+		return cacheCopy
+	}
+
+	r.parentLogger.Debugf(nil, "Building full attribute map (lazy loading if needed)") // Use nil context if none available
+
+	// --- Build initial map from base instance data ---
 	attrs := make(map[string]any)
-	if bdm.DeviceName != nil {
-		attrs["device_name"] = *bdm.DeviceName
+	// Pass logger down to mapping helpers
+	mapBaseInstanceAttributes(&r.baseInstance, r.meta.Region, r.meta.AccountID, attrs, r.parentLogger)
+
+	// --- Trigger Lazy Loading ---
+	// Using background context for now - Ideally context should be passed to Attributes()
+	// If Attributes() doesn't take context, these background fetches might outlive the request.
+	// For this exercise, let's use context.Background(), but acknowledge the limitation.
+	ctx := context.Background()
+
+	// User Data
+	userDataValue, userDataErr := r.getUserData(ctx) // Use getter method
+	if userDataErr == nil && userDataValue != nil {
+		attrs[domain.ComputeUserDataKey] = *userDataValue
+	} else if userDataErr != nil {
+		r.parentLogger.Warnf(ctx, "Failed to lazy-load user data: %v", userDataErr)
+		// Optionally add an error marker attribute
+		// attrs["_error_user_data"] = userDataErr.Error()
 	}
 
-	// Check if the Ebs field is populated
-	if bdm.Ebs != nil {
-		ebsSpec := bdm.Ebs // ebsSpec is of type *types.EbsInstanceBlockDevice
+	// Volumes
+	volumeDetails, volumesErr := r.getVolumes(ctx) // Use getter method
+	if volumesErr == nil && len(volumeDetails) > 0 {
+		// Map block devices using volume details
+		r.mapBlockDevicesUsingVolumes(attrs, volumeDetails)
+	} else if volumesErr != nil {
+		r.parentLogger.Warnf(ctx, "Failed to lazy-load volume details: %v. Falling back to mapping from instance data.", volumesErr)
+		// Fallback to mapping only from baseInstance data
+		r.mapBlockDevicesFromInstanceOnly(attrs)
+		// Optionally add an error marker attribute
+		// attrs["_error_volumes"] = volumesErr.Error()
+	} else {
+		// No volumes attached or fetched successfully, map from baseInstance mapping only
+		r.mapBlockDevicesFromInstanceOnly(attrs)
+	}
 
-		// Safely access fields within ebsSpec
-		if ebsSpec.VolumeId != nil {
-			attrs["volume_id"] = *ebsSpec.VolumeId
+	// --- Cache and return ---
+	r.attributesCache = attrs
+	r.attributesBuilt = true
+	r.parentLogger.Debugf(ctx, "Attribute map built successfully")
 
-			// Make an additional API call to get complete volume information
-			var client interface{}
-			if ec2VolumeClientFactory != nil {
-				client = ec2VolumeClientFactory(cfg)
-			} else {
-				client = awsec2.NewFromConfig(cfg)
-			}
+	finalMap := make(map[string]any, len(attrs))
+	for k, v := range attrs {
+		finalMap[k] = v
+	}
+	return finalMap
+}
 
-			// Try to use client as volume client
-			if volumeClient, ok := client.(DescribeVolumesClient); ok {
-				volumeInput := &awsec2.DescribeVolumesInput{
-					VolumeIds: []string{*ebsSpec.VolumeId},
-				}
+// getUserData fetches UserData via API call, uses simple bool flag for fetch control under lock.
+func (r *ec2InstanceResource) getUserData(ctx context.Context) (*string, error) {
+	r.mu.RLock()
+	if r.userDataFetched {
+		err := r.userDataErr // Read potentially cached error
+		r.mu.RUnlock()
+		return r.userData, err // Return cached data/error
+	}
+	r.mu.RUnlock()
 
-				volumeOutput, err := volumeClient.DescribeVolumes(ctx, volumeInput)
-				if err == nil && len(volumeOutput.Volumes) > 0 {
-					// Successfully retrieved volume info
-					volume := volumeOutput.Volumes[0]
+	// Acquire write lock to perform fetch
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-					if volume.VolumeType != "" {
-						attrs["volume_type"] = string(volume.VolumeType)
-					}
+	// Double check if fetched by another goroutine while waiting
+	if r.userDataFetched {
+		return r.userData, r.userDataErr
+	}
 
-					if volume.Size != nil {
-						attrs["volume_size"] = *volume.Size
-					}
+	// Perform the fetch
+	client := ec2.NewFromConfig(r.awsConfig)
+	logger := r.parentLogger.WithFields(map[string]any{"lazy_fetch": "userdata"})
+	logger.Debugf(ctx, "Lazy fetching UserData API call")
 
-					if volume.Iops != nil {
-						attrs["iops"] = *volume.Iops
-					}
+	input := &ec2.DescribeInstanceAttributeInput{
+		Attribute:  types.InstanceAttributeNameUserData,
+		InstanceId: &r.meta.ProviderAssignedID,
+	}
 
-					if volume.Throughput != nil {
-						attrs["throughput"] = *volume.Throughput
-					}
+	if err := util.Wait(ctx, logger); err != nil {
+		r.userDataErr = err
+		r.userDataFetched = true // Mark as fetched even on limiter error
+		return nil, err
+	}
 
-					if volume.Encrypted != nil {
-						attrs["encrypted"] = *volume.Encrypted
-					}
+	result, err := client.DescribeInstanceAttribute(ctx, input)
+	r.userDataFetched = true // Mark as fetched regardless of API outcome
 
-					if volume.KmsKeyId != nil {
-						attrs["kms_key_id"] = *volume.KmsKeyId
-					}
-
-					if volume.SnapshotId != nil {
-						attrs["snapshot_id"] = *volume.SnapshotId
-					}
-				}
-			}
-			// If API call failed, we'll still have the basic volume_id,
-			// but will miss the detailed attributes
+	if err != nil {
+		r.userDataErr = err
+		logger.Warnf(ctx, "DescribeInstanceAttribute(UserData) API call failed: %v", err)
+		return nil, err
+	}
+	if result.UserData != nil && result.UserData.Value != nil && *result.UserData.Value != "" {
+		decodedBytes, decodeErr := base64.StdEncoding.DecodeString(*result.UserData.Value)
+		if decodeErr != nil {
+			r.userDataErr = errors.Wrap(decodeErr, errors.CodeInternal, "failed to decode UserData") // Wrap decode error
+			logger.Warnf(ctx, "Failed to decode UserData: %v", decodeErr)
+			return nil, r.userDataErr
 		}
+		decodedStr := string(decodedBytes)
+		r.userData = &decodedStr
+		logger.Debugf(ctx, "Successfully fetched and decoded UserData")
+	} else {
+		logger.Debugf(ctx, "No UserData attribute found")
+	}
 
-		if ebsSpec.DeleteOnTermination != nil {
-			attrs["delete_on_termination"] = *ebsSpec.DeleteOnTermination
+	r.userDataErr = nil // Explicitly nil error on success or no data found
+	return r.userData, nil
+}
+
+func (r *ec2InstanceResource) getVolumes(ctx context.Context) (map[string]types.Volume, error) {
+	r.mu.RLock()
+	if r.volumesFetched {
+		err := r.volumesErr
+		r.mu.RUnlock()
+		return r.volumes, err
+	}
+	r.mu.RUnlock()
+
+	// Acquire write lock
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Double check
+	if r.volumesFetched {
+		return r.volumes, r.volumesErr
+	}
+
+	// Perform the fetch
+	client := ec2.NewFromConfig(r.awsConfig)
+	logger := r.parentLogger.WithFields(map[string]any{"lazy_fetch": "volumes"})
+	logger.Debugf(ctx, "Lazy fetching EBS Volume details")
+
+	volumeIDs := extractEBSVolumeIDs(&r.baseInstance)
+	if len(volumeIDs) == 0 {
+		logger.Debugf(ctx, "No EBS volumes found in instance block device mappings, skipping DescribeVolumes")
+		r.volumes = make(map[string]types.Volume) // Empty map, no error
+		r.volumesFetched = true
+		r.volumesErr = nil
+		return r.volumes, nil
+	}
+
+	input := &ec2.DescribeVolumesInput{VolumeIds: volumeIDs}
+	logger.Debugf(ctx, "Calling DescribeVolumes for %d volumes", len(volumeIDs))
+
+	if err := util.Wait(ctx, logger); err != nil {
+		r.volumesErr = err
+		r.volumesFetched = true
+		return nil, err
+	}
+
+	// DescribeVolumes generally doesn't need pagination when filtering by IDs,
+	// but robust code might handle it anyway if large numbers of IDs were possible.
+	output, err := client.DescribeVolumes(ctx, input)
+	r.volumesFetched = true // Mark as fetched
+
+	if err != nil {
+		r.volumesErr = err
+		logger.Warnf(ctx, "DescribeVolumes API call failed: %v", err)
+		return nil, err
+	}
+
+	r.volumes = make(map[string]types.Volume)
+	for _, vol := range output.Volumes {
+		if vol.VolumeId != nil {
+			r.volumes[*vol.VolumeId] = vol
 		}
 	}
-	return attrs
+	logger.Debugf(ctx, "Successfully described %d volumes", len(r.volumes))
+	r.volumesErr = nil
+	return r.volumes, nil
+}
+
+func mapBaseInstanceAttributes(instance *types.Instance, region string, accountID string, attrs map[string]any, logger ports.Logger) {
+	attrs[domain.ComputeInstanceTypeKey] = string(instance.InstanceType)
+	attrs[domain.ComputeImageIDKey] = aws.ToString(instance.ImageId)
+	attrs[domain.ComputeSubnetIDKey] = aws.ToString(instance.SubnetId)
+	if instance.Placement != nil {
+		attrs[domain.ComputeAvailabilityZoneKey] = aws.ToString(instance.Placement.AvailabilityZone)
+	}
+	if instance.IamInstanceProfile != nil {
+		attrs[domain.ComputeIAMInstanceProfileKey] = aws.ToString(instance.IamInstanceProfile.Arn)
+	}
+
+	securityGroupIDs := make([]string, 0, len(instance.SecurityGroups))
+	for _, sg := range instance.SecurityGroups {
+		securityGroupIDs = append(securityGroupIDs, aws.ToString(sg.GroupId))
+	}
+	attrs[domain.ComputeSecurityGroupsKey] = securityGroupIDs
+
+	tags := make(map[string]string)
+	nameTag := ""
+	for _, tag := range instance.Tags {
+		key := aws.ToString(tag.Key)
+		tags[key] = aws.ToString(tag.Value)
+		if key == "Name" {
+			nameTag = aws.ToString(tag.Value)
+		}
+	}
+	attrs[domain.KeyTags] = tags
+	attrs[domain.KeyID] = aws.ToString(instance.InstanceId)
+	attrs[domain.KeyName] = nameTag
+}
+
+func (r *ec2InstanceResource) mapBlockDevicesUsingVolumes(attrs map[string]any, volumes map[string]types.Volume) {
+	rootDeviceName := aws.ToString(r.baseInstance.RootDeviceName)
+	if rootDeviceName != "" {
+		for _, bdm := range r.baseInstance.BlockDeviceMappings {
+			if aws.ToString(bdm.DeviceName) == rootDeviceName {
+				attrs[domain.ComputeRootBlockDeviceKey] = mapSingleBlockDevice(bdm, volumes, true, r.parentLogger)
+				break
+			}
+		}
+	}
+	ebsDevicesAttrs := make([]map[string]any, 0)
+	for _, bdm := range r.baseInstance.BlockDeviceMappings {
+		if bdm.Ebs != nil && aws.ToString(bdm.DeviceName) != rootDeviceName {
+			blockMap := mapSingleBlockDevice(bdm, volumes, false, r.parentLogger)
+			if blockMap != nil {
+				ebsDevicesAttrs = append(ebsDevicesAttrs, blockMap)
+			}
+		}
+	}
+	if len(ebsDevicesAttrs) > 0 {
+		attrs[domain.ComputeEBSBlockDevicesKey] = ebsDevicesAttrs
+	}
+}
+
+func (r *ec2InstanceResource) mapBlockDevicesFromInstanceOnly(attrs map[string]any) {
+	rootDeviceName := aws.ToString(r.baseInstance.RootDeviceName)
+	if rootDeviceName != "" {
+		for _, bdm := range r.baseInstance.BlockDeviceMappings {
+			if aws.ToString(bdm.DeviceName) == rootDeviceName {
+				attrs[domain.ComputeRootBlockDeviceKey] = mapSingleBlockDevice(bdm, nil, true, r.parentLogger)
+				break
+			}
+		}
+	}
+	ebsDevicesAttrs := make([]map[string]any, 0)
+	for _, bdm := range r.baseInstance.BlockDeviceMappings {
+		if bdm.Ebs != nil && aws.ToString(bdm.DeviceName) != rootDeviceName {
+			blockMap := mapSingleBlockDevice(bdm, nil, false, r.parentLogger)
+			if blockMap != nil {
+				ebsDevicesAttrs = append(ebsDevicesAttrs, blockMap)
+			}
+		}
+	}
+	if len(ebsDevicesAttrs) > 0 {
+		attrs[domain.ComputeEBSBlockDevicesKey] = ebsDevicesAttrs
+	}
+}
+
+func mapSingleBlockDevice(bdm types.InstanceBlockDeviceMapping, volumes map[string]types.Volume, isRoot bool, logger ports.Logger) map[string]any {
+	if bdm.Ebs == nil {
+		return nil
+	} // Can only map EBS currently
+	volID := aws.ToString(bdm.Ebs.VolumeId)
+	devName := aws.ToString(bdm.DeviceName)
+	norm := make(map[string]any)
+	norm["device_name"] = devName
+	norm["delete_on_termination"] = aws.ToBool(bdm.Ebs.DeleteOnTermination)
+
+	if volumes != nil { // Check if volume details were successfully fetched
+		if vol, ok := volumes[volID]; ok {
+			norm["volume_type"] = string(vol.VolumeType)
+			norm["volume_size"] = aws.ToInt32(vol.Size)
+			norm["iops"] = aws.ToInt32(vol.Iops)
+			norm["throughput"] = aws.ToInt32(vol.Throughput)
+			norm["encrypted"] = aws.ToBool(vol.Encrypted)
+			norm["kms_key_id"] = aws.ToString(vol.KmsKeyId)
+			norm["snapshot_id"] = aws.ToString(vol.SnapshotId)
+		} else {
+			logger.Warnf(nil, "Volume %s (Device: %s) not found in DescribeVolumes results, using potentially inaccurate mapping data", volID, devName)
+			// Fallback if volume map provided but ID missing (should be rare)
+			norm["encrypted"] = false // Safer default?
+		}
+	} else {
+		// Fallback if volume map is nil (e.g., from ListResources path or DescribeVolumes error)
+		logger.Debugf(nil, "No volume details available for device %s (Volume: %s), using basic mapping data", devName, volID)
+		norm["encrypted"] = false // Cannot determine encryption without DescribeVolumes
+	}
+	// Apply defaults AFTER potential data population
+	if _, exists := norm["delete_on_termination"]; !exists {
+		norm["delete_on_termination"] = isRoot
+	}
+
+	return norm
+}
+
+func extractEBSVolumeIDs(instance *types.Instance) []string {
+	if instance == nil {
+		return nil
+	}
+	volumeIDs := make([]string, 0)
+	idSet := make(map[string]struct{})
+	for _, bdm := range instance.BlockDeviceMappings {
+		if bdm.Ebs != nil && bdm.Ebs.VolumeId != nil {
+			volID := aws.ToString(bdm.Ebs.VolumeId)
+			if _, exists := idSet[volID]; !exists && volID != "" {
+				volumeIDs = append(volumeIDs, volID)
+				idSet[volID] = struct{}{}
+			}
+		}
+	}
+	return volumeIDs
 }

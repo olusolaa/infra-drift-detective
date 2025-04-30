@@ -1,0 +1,253 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>aws: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/provider.go (96.2%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">not covered</span>
+				<span class="cov8">covered</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package aws
+
+import (
+        "context"
+        "fmt"
+        "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/types"
+
+        "github.com/aws/aws-sdk-go-v2/aws"
+        "github.com/aws/aws-sdk-go-v2/config"
+
+        "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/ec2"
+        "github.com/olusolaa/infra-drift-detector/internal/core/domain"
+        "github.com/olusolaa/infra-drift-detector/internal/core/ports"
+        "github.com/olusolaa/infra-drift-detector/internal/errors"
+        "golang.org/x/sync/errgroup" // Import errgroup for managing handler routines
+)
+
+type Provider struct {
+        awsConfig aws.Config
+        handlers  map[domain.ResourceKind]AWSResourceHandler
+        logger    ports.Logger // Inject logger into provider
+}
+
+// NewProvider needs logger
+func NewProvider(ctx context.Context, logger ports.Logger) (*Provider, error) <span class="cov8" title="1">{
+        if logger == nil </span><span class="cov8" title="1">{
+                // Fallback or error? Let's error - logger is essential.
+                return nil, errors.New(errors.CodeConfigValidation, "logger cannot be nil for AWS Provider")
+        }</span>
+        <span class="cov8" title="1">cfg, err := config.LoadDefaultConfig(ctx)
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, errors.Wrap(err, errors.CodeConfigValidation, "failed to load default AWS config")
+        }</span>
+
+        <span class="cov8" title="1">p := &amp;Provider{
+                awsConfig: cfg,
+                handlers:  make(map[domain.ResourceKind]AWSResourceHandler),
+                logger:    logger, // Store logger
+        }
+
+        ec2Handler := ec2.NewHandler(cfg)
+        p.registerHandler(ec2Handler)
+        // Register other handlers...
+
+        if len(p.handlers) == 0 </span><span class="cov0" title="0">{
+                return nil, errors.New(errors.CodeInternal, "no AWS resource handlers registered")
+        }</span>
+        <span class="cov8" title="1">return p, nil</span>
+}
+
+func NewProviderWithHandlers(cfg aws.Config, logger ports.Logger, handlers ...AWSResourceHandler) *Provider <span class="cov8" title="1">{
+        p := &amp;Provider{
+                awsConfig: cfg,
+                handlers:  make(map[domain.ResourceKind]AWSResourceHandler),
+                logger:    logger,
+        }
+        
+        for _, handler := range handlers </span><span class="cov8" title="1">{
+                p.registerHandler(handler)
+        }</span>
+        
+        <span class="cov8" title="1">return p</span>
+}
+
+// registerHandler remains the same
+func (p *Provider) registerHandler(handler AWSResourceHandler) <span class="cov8" title="1">{
+        // ... implementation ... // (Same as before)
+        if handler != nil </span><span class="cov8" title="1">{
+                kind := handler.Kind()
+                p.handlers[kind] = handler
+        }</span>
+}
+
+// Type remains the same
+func (p *Provider) Type() string <span class="cov8" title="1">{
+        return types.ProviderTypeAWS
+}</span>
+
+// ListResources now orchestrates calling handlers concurrently and streams results.
+// IMPORTANT: This method now *blocks* until all handlers for the requested kinds finish
+// and it pushes all results onto the 'out' channel passed from the engine.
+func (p *Provider) ListResources(
+        ctx context.Context,
+        requestedKinds []domain.ResourceKind, // Accept list of kinds engine wants
+        filters map[string]string, // Filters might need to be kind-specific in future
+        out chan&lt;- domain.PlatformResource, // Engine provides the output channel
+) error <span class="cov8" title="1">{
+        g, childCtx := errgroup.WithContext(ctx)
+
+        foundHandler := false
+        for _, kind := range requestedKinds </span><span class="cov8" title="1">{
+                handler, found := p.handlers[kind]
+                if !found </span><span class="cov8" title="1">{
+                        p.logger.Warnf(childCtx, "Resource kind '%s' not supported by AWS provider, skipping", kind)
+                        continue</span> // Skip unsupported kinds
+                }
+                <span class="cov8" title="1">foundHandler = true
+
+                // Create local copy of kind for the goroutine closure
+                currentKind := kind
+                currentHandler := handler
+
+                g.Go(func() error </span><span class="cov8" title="1">{
+                        // Pass provider's logger down to the handler
+                        handlerLogger := p.logger.WithFields(map[string]any{"resource_kind": currentKind})
+                        handlerLogger.Debugf(childCtx, "Starting ListResources for handler")
+                        // The handler now sends directly to the 'out' channel
+                        err := currentHandler.ListResources(childCtx, p.awsConfig, filters, handlerLogger, out)
+                        if err != nil </span><span class="cov8" title="1">{
+                                // Log the error from the handler
+                                handlerLogger.Errorf(childCtx, err, "Handler failed")
+                                // Propagate the error to the errgroup
+                                return err // Return the actual error, not wrapped again here
+                        }</span>
+                        <span class="cov8" title="1">handlerLogger.Debugf(childCtx, "Finished ListResources for handler")
+                        return nil</span>
+                })
+        }
+
+        <span class="cov8" title="1">if !foundHandler &amp;&amp; len(requestedKinds) &gt; 0 </span><span class="cov8" title="1">{
+                return errors.New(errors.CodeNotImplemented, "no supported resource kinds found for AWS provider among requested kinds")
+        }</span>
+
+        // Wait for all handler Goroutines to complete.
+        <span class="cov8" title="1">if err := g.Wait(); err != nil </span><span class="cov8" title="1">{
+                // Error already logged by the handler/goroutine, just return it
+                // Avoid wrapping context errors again
+                if err == context.Canceled || err == context.DeadlineExceeded </span><span class="cov8" title="1">{
+                        p.logger.Warnf(ctx, "AWS ListResources cancelled or timed out.")
+                }</span> else<span class="cov8" title="1"> {
+                        p.logger.Errorf(ctx, err, "Error occurred during AWS ListResources execution")
+                }</span>
+                <span class="cov8" title="1">return err</span> // Return the first error encountered by any handler
+        }
+
+        <span class="cov8" title="1">p.logger.Debugf(ctx, "All AWS resource handlers finished successfully.")
+        return nil</span> // Overall success if no handler returned an error
+}
+
+// GetResource delegates to the appropriate handler, passing the logger.
+func (p *Provider) GetResource(ctx context.Context, kind domain.ResourceKind, id string) (domain.PlatformResource, error) <span class="cov8" title="1">{
+        handler, found := p.handlers[kind]
+        if !found </span><span class="cov8" title="1">{
+                return nil, errors.New(errors.CodeNotImplemented, fmt.Sprintf("resource kind '%s' not supported by AWS provider", kind))
+        }</span>
+
+        // Pass logger down to the handler's GetResource method
+        <span class="cov8" title="1">handlerLogger := p.logger.WithFields(map[string]any{"resource_kind": kind, "resource_id": id})
+        return handler.GetResource(ctx, p.awsConfig, id, handlerLogger)</span>
+}
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

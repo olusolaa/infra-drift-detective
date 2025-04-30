@@ -10,8 +10,6 @@ import (
 
 type AWSResourceHandler interface {
 	Kind() domain.ResourceKind
-	// ListResources now sends results to a channel instead of returning a slice.
-	// It also accepts a logger for internal logging.
 	ListResources(
 		ctx context.Context,
 		cfg aws.Config,

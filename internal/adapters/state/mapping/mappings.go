@@ -46,8 +46,8 @@ var computeInstanceAttrMap = attributeMapDefinition{
 }
 
 var s3BucketAttrMap = attributeMapDefinition{
-	"acl": domain.StorageBucketACLKey,
-	// versioning needs special handling
+	"acl":                                  domain.StorageBucketACLKey,
+	"versioning":                           domain.StorageBucketVersioningKey, // Added mapping for versioning
 	"lifecycle_rule":                       domain.StorageBucketLifecycleRulesKey,
 	"logging":                              domain.StorageBucketLoggingKey,
 	"website":                              domain.StorageBucketWebsiteKey,
@@ -164,7 +164,6 @@ func normalizeSingleBlockDevice(rawVal any, isRoot bool) map[string]any {
 	return nil // Return nil if structure invalid or list empty
 }
 
-// normalizeBlockDeviceSlice handles the list of EBS devices from TF state.
 func normalizeBlockDeviceSlice(rawVal any) []map[string]any {
 	if blockList, ok := rawVal.([]any); ok && len(blockList) > 0 {
 		normalizedBlocks := make([]map[string]any, 0, len(blockList))
