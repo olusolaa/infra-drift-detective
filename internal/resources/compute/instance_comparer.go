@@ -27,11 +27,14 @@ func (c *InstanceComparer) Compare(
 	attributesToCheck []string,
 ) ([]domain.AttributeDiff, error) {
 	if desired == nil || actual == nil {
+		// no errors.new should be returning defined arror that you instantiate
 		return nil, errors.New(errors.CodeInternal, "compare called with nil desired or actual resource")
 	}
 
 	desiredAttrs := desired.Attributes()
 	actualAttrs := actual.Attributes()
+	// what happens if the attribute has a nested value should it be compared recursively?
+	// and where you may consider using go concurrency to compare attributes in parallel
 	diffs := make([]domain.AttributeDiff, 0)
 	checkMap := make(map[string]struct{})
 	for _, attr := range attributesToCheck {
