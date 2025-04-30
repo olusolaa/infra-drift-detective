@@ -1,5 +1,6 @@
 package aws_test
 
+// test files should be in the same package as the code they test
 import (
 	"context"
 	"sync"
