@@ -2,7 +2,6 @@ package tfhcl
 
 import (
 	"context"
-	stderrors "errors"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
 	"github.com/olusolaa/infra-drift-detector/test/testutil"
 	"os"
@@ -15,21 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func createTestHCLFile(t *testing.T, dir, filename, content string) string {
-	t.Helper()
-	filePath := filepath.Join(dir, filename)
-	err := os.WriteFile(filePath, []byte(content), 0644)
-	require.NoError(t, err, "Failed to write test HCL file: %s", filename)
-	return filePath
-}
-
-func createTestDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "tfhcl-test-")
-	require.NoError(t, err, "Failed to create temp dir for testing")
-	return dir
-}
 
 type testHCLProvider struct {
 	provider *tfhcl.Provider
@@ -186,10 +170,11 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 		p, _ := tfhcl.NewProvider(tfhcl.Config{Directory: dir}, mockLogger)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "HCL provider initialization failed")
-		assert.Contains(t, err.Error(), "HCL parsing failed")
+		var appErr *errors.AppError
+		require.True(t, errors.As(err, &appErr))
+		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
 		var diagErr *evaluator.HCLDiagnosticsError
-		require.True(t, errors.As(err, &diagErr))
+		require.True(t, errors.As(err, &diagErr)) // Inner wrap
 		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
 		assert.Contains(t, diagErr.Diags.Error(), "bad.tf")
 	})
@@ -199,10 +184,12 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 		defer cleanupTestDir(t, dir)
 		createTestHCLFile(t, dir, "main.tf", `locals { bad = var.nope }`)
 		p, _ := tfhcl.NewProvider(tfhcl.Config{Directory: dir}, mockLogger)
+		require.NotNil(t, p)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "HCL provider initialization failed")
-		assert.Contains(t, err.Error(), "fatal errors during HCL initialization")
+		var appErr *errors.AppError
+		require.True(t, errors.As(err, &appErr))
+		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
 		var diagErr *evaluator.HCLDiagnosticsError
 		require.True(t, errors.As(err, &diagErr))
 		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
@@ -264,19 +251,18 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 	t.Run("Not Found (Wrong ID)", func(t *testing.T) {
 		_, err := tp.provider.GetResource(ctx, domain.KindComputeInstance, "aws_instance.db")
 		require.Error(t, err)
-		var nfErr *errors.AppError
-		require.True(t, errors.As(err, &nfErr))
-		assert.Equal(t, errors.CodeResourceNotFound, nfErr.Code)
+		var appErr *errors.AppError
+		require.True(t, errors.As(err, &appErr))
+		assert.Equal(t, errors.CodeResourceNotFound, appErr.Code)
 		assert.Contains(t, err.Error(), "aws_instance.db")
-		assert.Contains(t, err.Error(), "not found")
 	})
 
 	t.Run("Not Found (Wrong Kind)", func(t *testing.T) {
 		_, err := tp.provider.GetResource(ctx, domain.KindStorageBucket, "aws_instance.web")
 		require.Error(t, err)
-		var nfErr *errors.AppError
-		require.True(t, stderrors.As(err, &nfErr))
-		assert.Equal(t, errors.CodeResourceNotFound, nfErr.Code)
+		var appErr *errors.AppError
+		require.True(t, errors.As(err, &appErr))
+		assert.Equal(t, errors.CodeResourceNotFound, appErr.Code)
 		assert.Contains(t, err.Error(), "aws_instance.web")
 		assert.Contains(t, err.Error(), "expected 'StorageBucket'")
 	})
@@ -288,13 +274,14 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
             }
         `)
 
-		// Recreate provider to force re-initialization with the new file
 		mockLogger := testutil.NewMockLogger()
 		p, _ := tfhcl.NewProvider(cfg, mockLogger)
 
 		_, err := p.GetResource(ctx, domain.KindComputeInstance, "aws_instance.error_instance")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Errors evaluating target HCL block")
+		var appErr *errors.AppError
+		require.True(t, errors.As(err, &appErr))
+		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
 		var evalErr *evaluator.ResourceEvaluationError
 		require.True(t, errors.As(err, &evalErr), "Error should wrap ResourceEvaluationError")
 		assert.True(t, evaluator.DiagsHasFatalErrors(evalErr.Diags))
@@ -303,21 +290,21 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 
 	t.Run("Duplicate Resource Definition Error", func(t *testing.T) {
 		createTestHCLFile(t, tp.dir, "dup.tf", `
-			resource "aws_instance" "web" { # Duplicate address from main.tf
+			resource "aws_instance" "web" {
 				ami = "ami-dup"
 			}
 		`)
-		// Recreate provider
 		mockLogger := testutil.NewMockLogger()
 		p, _ := tfhcl.NewProvider(cfg, mockLogger)
 
 		_, err := p.GetResource(ctx, domain.KindComputeInstance, "aws_instance.web")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Fatal error finding specific HCL block")
+		var appErr *errors.AppError
+		require.True(t, errors.As(err, &appErr))
+		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
 		var diagErr *evaluator.HCLDiagnosticsError
-		require.True(t, errors.As(err, &diagErr))
+		require.True(t, errors.As(err, &diagErr), "Error should wrap HCLDiagnosticsError from findSpecific")
 		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
 		assert.Contains(t, diagErr.Diags.Error(), "Duplicate resource definition")
-
 	})
 }

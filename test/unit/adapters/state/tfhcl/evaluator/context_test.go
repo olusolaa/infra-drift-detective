@@ -1,15 +1,15 @@
-package evaluator_test
+package evaluator
 
 import (
 	"context"
-	"github.com/hashicorp/hcl/v2"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator"
+	"github.com/olusolaa/infra-drift-detector/test/testutil"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
-	"github.com/olusolaa/infra-drift-detector/test/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -36,7 +36,7 @@ func parseTestBody(t *testing.T, content string) hcl.Body {
 func TestBuildEvalContext(t *testing.T) {
 	mockLogger := testutil.NewMockLogger()
 	ctx := context.Background()
-	baseDir := t.TempDir() // Use temp dir for base
+	baseDir := t.TempDir()
 
 	t.Run("No Vars No Locals", func(t *testing.T) {
 		body := parseTestBody(t, `resource "test" "a" {}`)
@@ -44,7 +44,6 @@ func TestBuildEvalContext(t *testing.T) {
 		require.False(t, diags.HasErrors(), diags.Error())
 		require.NotNil(t, evalCtx)
 
-		// Check standard context variables
 		pathVar, ok := evalCtx.Variables["path"]
 		require.True(t, ok)
 		require.Equal(t, cty.Object, pathVar.Type().FriendlyName())
@@ -74,7 +73,7 @@ func TestBuildEvalContext(t *testing.T) {
 		varsFile := createTestFile(t, baseDir, "test.tfvars", varsContent)
 		body := parseTestBody(t, `resource "test" "a" {}`)
 
-		evalCtx, diags := evaluator.BuildEvalContext(ctx, body, []string{varsFile}, baseDir, "prod", mockLogger) // Pass relative path if file is in baseDir
+		evalCtx, diags := evaluator.BuildEvalContext(ctx, body, []string{varsFile}, baseDir, "prod", mockLogger)
 		require.False(t, diags.HasErrors(), diags.Error())
 		require.NotNil(t, evalCtx)
 
@@ -82,7 +81,7 @@ func TestBuildEvalContext(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, 2, varVar.LengthInt())
 		assert.Equal(t, "us-west-2", varVar.GetAttr("region").AsString())
-		assert.True(t, cty.Number.Equals(varVar.GetAttr("count").Type())) // Check type
+		assert.True(t, cty.Number.Equals(varVar.GetAttr("count").Type()))
 		countVal, _ := varVar.GetAttr("count").AsBigFloat().Float64()
 		assert.Equal(t, float64(3), countVal)
 	})
@@ -108,16 +107,17 @@ func TestBuildEvalContext(t *testing.T) {
 	t.Run("With Invalid Vars Path", func(t *testing.T) {
 		body := parseTestBody(t, `resource "test" "a" {}`)
 		_, diags := evaluator.BuildEvalContext(ctx, body, []string{"nonexistent.tfvars"}, baseDir, "default", mockLogger)
-		// loadVariables should append error diagnostics
 		assert.True(t, diags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Contains(t, diags.Error(), "Cannot read variables file")
 	})
 
 	t.Run("With Vars Syntax Error", func(t *testing.T) {
-		varsFile := createTestFile(t, baseDir, "bad.tfvars", `name = "test`) // Missing closing quote
+		varsFile := createTestFile(t, baseDir, "bad.tfvars", `name = "test`)
 		body := parseTestBody(t, `resource "test" "a" {}`)
 		_, diags := evaluator.BuildEvalContext(ctx, body, []string{varsFile}, baseDir, "default", mockLogger)
 		assert.True(t, diags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Contains(t, diags.Error(), "bad.tfvars")
 	})
 
@@ -161,13 +161,13 @@ func TestBuildEvalContext(t *testing.T) {
 	t.Run("With Locals Evaluation Error", func(t *testing.T) {
 		body := parseTestBody(t, `
 			locals {
-				bad = var.nonexistent # Reference to undefined var
+				bad = var.nonexistent
 			}
 			resource "test" "a" {}
 		`)
 		evalCtx, diags := evaluator.BuildEvalContext(ctx, body, nil, baseDir, "default", mockLogger)
-		// Context build should fail, return nil context
 		assert.True(t, diags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Nil(t, evalCtx)
 		assert.Contains(t, diags.Error(), "var.nonexistent")
 	})
@@ -178,12 +178,13 @@ func TestBuildEvalContext(t *testing.T) {
 				name = "a"
 			}
             locals {
-                name = "b" // Duplicate
+                name = "b"
             }
 			resource "test" "a" {}
 		`)
 		evalCtx, diags := evaluator.BuildEvalContext(ctx, body, nil, baseDir, "default", mockLogger)
 		assert.True(t, diags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Nil(t, evalCtx)
 		assert.Contains(t, diags.Error(), "Duplicate local value definition")
 		assert.Contains(t, diags.Error(), `named "name"`)

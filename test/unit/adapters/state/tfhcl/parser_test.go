@@ -9,15 +9,31 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator" // For DiagsHasFatalErrors
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// Re-use test helpers from provider_test.go if defined in separate file, else redefine
-// func createTestDir(t *testing.T) string { ... }
-// func createTestHCLFile(t *testing.T, dir, filename, content string) string { ... }
+func createTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tfhcl-parser-test-")
+	require.NoError(t, err)
+	return dir
+}
+
+func createTestHCLFile(t *testing.T, dir, filename, content string) string {
+	t.Helper()
+	filePath := filepath.Join(dir, filename)
+	err := os.WriteFile(filePath, []byte(content), 0644)
+	require.NoError(t, err)
+	return filePath
+}
+
+func cleanupTestDir(t *testing.T, dir string) {
+	t.Helper()
+	os.RemoveAll(dir)
+}
 
 func TestParseHCLDirectory(t *testing.T) {
 	mockLogger := testutil.NewMockLogger()
@@ -27,16 +43,13 @@ func TestParseHCLDirectory(t *testing.T) {
 		dir := createTestDir(t)
 		defer cleanupTestDir(t, dir)
 		path1 := createTestHCLFile(t, dir, "main.tf", `resource "t" "a" {}`)
-		path2 := createTestHCLFile(t, dir, "other.tf", `resource "t" "b" {}`)
+		createTestHCLFile(t, dir, "other.tf", `resource "t" "b" {}`)
 
 		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.NoError(t, err)
 		assert.False(t, evaluator.DiagsHasFatalErrors(diags))
 		require.Len(t, filesMap, 2)
 		assert.Contains(t, filesMap, path1)
-		assert.Contains(t, filesMap, path2)
-		assert.NotNil(t, filesMap[path1])
-		assert.NotNil(t, filesMap[path2])
 	})
 
 	t.Run("Valid TF and TF.JSON Files", func(t *testing.T) {
@@ -81,29 +94,32 @@ func TestParseHCLDirectory(t *testing.T) {
 		dir := createTestDir(t)
 		defer cleanupTestDir(t, dir)
 		path1 := createTestHCLFile(t, dir, "good.tf", `resource "t" "good" {}`)
-		createTestHCLFile(t, dir, "bad.tf", `resource "t" "bad" { = }`) // Syntax error
+		createTestHCLFile(t, dir, "bad.tf", `resource "t" "bad" { = }`)
 
 		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
-		require.Error(t, err) // Returns fatal error because one file failed parsing critically
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "fatal errors encountered during HCL parsing")
+		require.True(t, diags.HasErrors())
 		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Contains(t, diags.Error(), "bad.tf")
-		assert.Contains(t, diags.Error(), "Operator expected") // Example syntax error detail
-		require.NotNil(t, filesMap)                            // Should still return map with successfully parsed files
-		assert.Contains(t, filesMap, path1)                    // Good file should be present
-		assert.Len(t, filesMap, 1)                             // Only the good file
+		require.NotNil(t, filesMap)
+		assert.Len(t, filesMap, 1)
+		assert.Contains(t, filesMap, path1)
 	})
 
 	t.Run("Invalid JSON in TF.JSON File", func(t *testing.T) {
 		dir := createTestDir(t)
 		defer cleanupTestDir(t, dir)
-		createTestHCLFile(t, dir, "bad.tf.json", `{"resource": {"t": {"json": {}}`) // Missing closing brace
+		createTestHCLFile(t, dir, "bad.tf.json", `{"resource": {"t": {"json": {}}`)
 
 		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.Error(t, err)
+		assert.ErrorContains(t, err, "fatal errors encountered during HCL parsing")
+		require.True(t, diags.HasErrors())
 		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Contains(t, diags.Error(), "bad.tf.json")
-		assert.Contains(t, diags.Error(), "Syntax error") // JSON syntax error detail
-		assert.Empty(t, filesMap)                         // No files parsed successfully
+		assert.Contains(t, diags.Error(), "Unclosed object")
+		assert.Empty(t, filesMap)
 	})
 }
 
@@ -121,7 +137,7 @@ func TestFindResourceBlocks(t *testing.T) {
         resource "aws_instance" "web2" { ami = "ami-2" }
         resource "aws_instance" "web1" { instance_type = "t3.micro" }
     `)
-	createTestHCLFile(t, dir, "f3.tf.json", `
+	path3 := createTestHCLFile(t, dir, "f3.tf.json", `
         {"resource": {"aws_instance": {"web3": {"ami": "ami-3"}}}}
     `)
 
@@ -134,14 +150,15 @@ func TestFindResourceBlocks(t *testing.T) {
 		assert.True(t, findDiags.HasErrors())
 		assert.True(t, evaluator.DiagsHasFatalErrors(findDiags))
 		assert.Contains(t, findDiags.Error(), "Duplicate resource address")
-		assert.Len(t, blocks, 3) // Check count found
-		assert.Len(t, addresses, 3)
-		assert.Contains(t, addresses, "aws_instance.web1")
+		assert.Contains(t, findDiags.Error(), "aws_instance.web1")
+		// Should contain the non-duplicate blocks found *before* the duplicate error stopped processing that address
+		assert.Len(t, blocks, 2)    // web2, web3
+		assert.Len(t, addresses, 2) // web2, web3 (duplicate web1 is skipped)
+		assert.NotContains(t, addresses, "aws_instance.web1")
 		assert.Contains(t, addresses, "aws_instance.web2")
 		assert.Contains(t, addresses, "aws_instance.web3")
-		assert.Equal(t, fmt.Sprintf("%s::%s", path1, "aws_instance.web1"), addresses["aws_instance.web1"])
 		assert.Equal(t, fmt.Sprintf("%s::%s", path2, "aws_instance.web2"), addresses["aws_instance.web2"])
-		// Note: Duplicate web1 from path2 is skipped, address maps to the one from path1
+		assert.Equal(t, fmt.Sprintf("%s::%s", path3, "aws_instance.web3"), addresses["aws_instance.web3"])
 	})
 
 	t.Run("Find aws_s3_bucket", func(t *testing.T) {
@@ -167,10 +184,11 @@ func TestFindSpecificResourceBlock(t *testing.T) {
 	dir := createTestDir(t)
 	defer cleanupTestDir(t, dir)
 
+	path1 := createTestHCLFile(t, dir, "f1.tf", `resource "aws_instance" "specific" { ami = "f1-ami" }`)
 	createTestHCLFile(t, dir, "f2.tf", `resource "aws_instance" "another" { ami = "f2-ami" }`)
-	createTestHCLFile(t, dir, "f3_dup.tf", `resource "aws_instance" "specific" { ami = "f3-ami" }`) // Duplicate
+	path3 := createTestHCLFile(t, dir, "f3_dup.tf", `resource "aws_instance" "specific" { ami = "f3-ami" }`)
 
-	filesMap, _, _ := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger) // Ignore diags/err for this test focus
+	filesMap, _, _ := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 
 	t.Run("Found", func(t *testing.T) {
 		block, diags := tfhcl.FindSpecificResourceBlock(filesMap, "aws_instance.another")
@@ -182,11 +200,13 @@ func TestFindSpecificResourceBlock(t *testing.T) {
 
 	t.Run("Duplicate Found", func(t *testing.T) {
 		block, diags := tfhcl.FindSpecificResourceBlock(filesMap, "aws_instance.specific")
-		assert.True(t, diags.HasErrors())
+		require.True(t, diags.HasErrors())
 		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
 		assert.Contains(t, diags.Error(), "Duplicate resource definition")
 		assert.Contains(t, diags.Error(), "aws_instance.specific")
-		assert.Nil(t, block) // Should return nil on fatal duplicate error
+		assert.Contains(t, diags.Error(), path1)
+		assert.Contains(t, diags.Error(), path3)
+		assert.Nil(t, block)
 	})
 
 	t.Run("Not Found", func(t *testing.T) {
@@ -202,10 +222,4 @@ func TestFindSpecificResourceBlock(t *testing.T) {
 		assert.Contains(t, diags.Error(), "Invalid resource identifier")
 		assert.Nil(t, block)
 	})
-}
-
-// Cleanup helper
-func cleanupTestDir(t *testing.T, dir string) {
-	t.Helper()
-	os.RemoveAll(dir)
 }

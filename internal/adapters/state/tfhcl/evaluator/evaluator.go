@@ -208,12 +208,3 @@ func filterUnsupportedArgDiagnostics(diags hcl.Diagnostics) hcl.Diagnostics {
 	}
 	return filteredDiags
 }
-
-func DiagsHasFatalErrors(diags hcl.Diagnostics) bool {
-	for _, diag := range diags {
-		if diag.Severity == hcl.DiagError {
-			return true
-		}
-	}
-	return false
-}

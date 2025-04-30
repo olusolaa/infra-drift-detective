@@ -72,10 +72,11 @@ func BuildEvalContext(
 	localsContent, contentDiags := mergedBody.Content(localsSchema)
 	mergedDiags = append(mergedDiags, contentDiags...)
 
-	localsVal, localsDiags := evaluateLocalsFromBody(localsContent, evalCtx, logger)
+	localsVal, localsDiags := evaluateLocalsFromContent(localsContent, evalCtx, logger)
 	mergedDiags = append(mergedDiags, localsDiags...)
-	if localsDiags.HasErrors() {
+	if DiagsHasFatalErrors(localsDiags) {
 		logger.Errorf(ctx, &HCLDiagnosticsError{Operation: "evaluating locals", FilePath: baseDir, Diags: localsDiags}, "Error evaluating locals block")
+		return nil, mergedDiags
 	}
 
 	if !localsVal.IsNull() && localsVal.IsKnown() && localsVal.Type().IsObjectType() && localsVal.LengthInt() > 0 {
@@ -86,7 +87,7 @@ func BuildEvalContext(
 	}
 
 	if DiagsHasFatalErrors(mergedDiags) {
-		logger.Errorf(ctx, &HCLDiagnosticsError{Operation: "building context", FilePath: baseDir, Diags: mergedDiags}, "Fatal errors occurred during overall context building")
+		logger.Errorf(ctx, &HCLDiagnosticsError{Operation: "building context", FilePath: baseDir, Diags: mergedDiags}, "Fatal errors building context")
 		return nil, mergedDiags
 	} else if len(mergedDiags) > 0 {
 		logger.Warnf(ctx, "Non-fatal diagnostics during context building:\n%s", mergedDiags.Error())
@@ -135,7 +136,7 @@ func loadVariables(varsFilePath string, logger ports.Logger) (map[string]cty.Val
 	return vars, diags
 }
 
-func evaluateLocalsFromBody(content *hcl.BodyContent, ctx *hcl.EvalContext, logger ports.Logger) (cty.Value, hcl.Diagnostics) {
+func evaluateLocalsFromContent(content *hcl.BodyContent, ctx *hcl.EvalContext, logger ports.Logger) (cty.Value, hcl.Diagnostics) {
 	var allLocalsDiags hcl.Diagnostics
 	locals := make(map[string]cty.Value)
 	definedLocals := make(map[string]hcl.Range)
@@ -178,4 +179,13 @@ func evaluateLocalsFromBody(content *hcl.BodyContent, ctx *hcl.EvalContext, logg
 		return cty.EmptyObjectVal, allLocalsDiags
 	}
 	return cty.ObjectVal(locals), allLocalsDiags
+}
+
+func DiagsHasFatalErrors(diags hcl.Diagnostics) bool {
+	for _, diag := range diags {
+		if diag.Severity == hcl.DiagError {
+			return true
+		}
+	}
+	return false
 }
