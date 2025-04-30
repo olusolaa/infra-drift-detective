@@ -11,7 +11,7 @@ const awsTagFilterPrefix = "tag:"
 
 // Defines mapping from generic domain filter keys to EC2 API filter names.
 var ec2FilterNameMap = map[string]string{
-	domain.KeyName:            "tag:Name", // Map domain.KeyName to tag:Name filter
+	domain.KeyName:            "tag:Name",
 	domain.ComputeImageIDKey:  "image-id",
 	domain.ComputeSubnetIDKey: "subnet-id",
 	// Map security group IDs requires different logic (below)

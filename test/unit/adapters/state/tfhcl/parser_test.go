@@ -1,220 +1,211 @@
-package tfhcl_test
+package tfhcl
 
 import (
 	"context"
+	"fmt"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
+	"github.com/olusolaa/infra-drift-detector/test/testutil"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator" // For DiagsHasFatalErrors
+	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
-	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 )
 
-// TestParseHCLDirectory tests the parser's ability to handle different HCL file scenarios
+// Re-use test helpers from provider_test.go if defined in separate file, else redefine
+// func createTestDir(t *testing.T) string { ... }
+// func createTestHCLFile(t *testing.T, dir, filename, content string) string { ... }
+
 func TestParseHCLDirectory(t *testing.T) {
-	tempDir := t.TempDir()
+	mockLogger := testutil.NewMockLogger()
+	ctx := context.Background()
 
-	t.Run("parse valid hcl file", func(t *testing.T) {
-		// Create a temporary HCL file
-		validHCL := `
-resource "aws_instance" "test" {
-  ami           = "ami-12345"
-  instance_type = "t2.micro"
-}
-`
-		err := os.WriteFile(filepath.Join(tempDir, "valid.tf"), []byte(validHCL), 0644)
+	t.Run("Valid TF Files", func(t *testing.T) {
+		dir := createTestDir(t)
+		defer cleanupTestDir(t, dir)
+		path1 := createTestHCLFile(t, dir, "main.tf", `resource "t" "a" {}`)
+		path2 := createTestHCLFile(t, dir, "other.tf", `resource "t" "b" {}`)
+
+		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.NoError(t, err)
-
-		// Create the provider which will parse this directory
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(tfhcl.Config{
-			Directory: tempDir,
-		}, mockLogger)
-		require.NoError(t, err)
-
-		// List resources to trigger parsing
-		resources, err := provider.ListResources(context.Background(), domain.KindComputeInstance)
-
-		// Assert
-		require.NoError(t, err)
-		assert.Len(t, resources, 1)
-		assert.Equal(t, "aws_instance.test", resources[0].Metadata().SourceIdentifier)
+		assert.False(t, evaluator.DiagsHasFatalErrors(diags))
+		require.Len(t, filesMap, 2)
+		assert.Contains(t, filesMap, path1)
+		assert.Contains(t, filesMap, path2)
+		assert.NotNil(t, filesMap[path1])
+		assert.NotNil(t, filesMap[path2])
 	})
 
-	t.Run("parse invalid hcl file", func(t *testing.T) {
-		// Create a temporary file with invalid HCL syntax
-		invalidHCL := `
-resource "aws_instance" "test" {
-  ami           = "ami-12345"
-  instance_type = "t2.micro"
-  // Missing closing brace
-`
-		invalidDir := filepath.Join(tempDir, "invalid")
-		err := os.Mkdir(invalidDir, 0755)
+	t.Run("Valid TF and TF.JSON Files", func(t *testing.T) {
+		dir := createTestDir(t)
+		defer cleanupTestDir(t, dir)
+		path1 := createTestHCLFile(t, dir, "main.tf", `resource "t" "tf" {}`)
+		path2 := createTestHCLFile(t, dir, "data.tf.json", `{"resource": {"t": {"json": {}}}}`)
+
+		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.NoError(t, err)
+		assert.False(t, evaluator.DiagsHasFatalErrors(diags))
+		require.Len(t, filesMap, 2)
+		assert.Contains(t, filesMap, path1)
+		assert.Contains(t, filesMap, path2)
+	})
 
-		err = os.WriteFile(filepath.Join(invalidDir, "invalid.tf"), []byte(invalidHCL), 0644)
-		require.NoError(t, err)
-
-		// Create the provider which will parse this directory
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(tfhcl.Config{
-			Directory: invalidDir,
-		}, mockLogger)
-		require.NoError(t, err)
-
-		// List resources to trigger parsing
-		_, err = provider.ListResources(context.Background(), domain.KindComputeInstance)
-
-		// Assert
+	t.Run("Directory Not Found", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "nonexistent")
+		_, _, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "HCL parsing errors")
+		assert.Contains(t, err.Error(), "failed to read HCL directory")
 	})
 
-	t.Run("parse empty directory", func(t *testing.T) {
-		emptyDir := filepath.Join(tempDir, "empty")
-		err := os.Mkdir(emptyDir, 0755)
-		require.NoError(t, err)
-
-		// Create the provider which will parse this directory
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(tfhcl.Config{
-			Directory: emptyDir,
-		}, mockLogger)
-		require.NoError(t, err)
-
-		// List resources to trigger parsing
-		_, err = provider.ListResources(context.Background(), domain.KindComputeInstance)
-
-		// Assert
+	t.Run("Empty Directory", func(t *testing.T) {
+		dir := createTestDir(t)
+		defer cleanupTestDir(t, dir)
+		_, _, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no valid HCL files")
+		assert.Contains(t, err.Error(), "no HCL files (.tf, .tf.json) found")
 	})
 
-	t.Run("parse directory with non-terraform files", func(t *testing.T) {
-		mixedDir := filepath.Join(tempDir, "mixed")
-		err := os.Mkdir(mixedDir, 0755)
-		require.NoError(t, err)
-
-		// Create a non-terraform file
-		err = os.WriteFile(filepath.Join(mixedDir, "README.md"), []byte("# Test"), 0644)
-		require.NoError(t, err)
-
-		// Create the provider which will parse this directory
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(tfhcl.Config{
-			Directory: mixedDir,
-		}, mockLogger)
-		require.NoError(t, err)
-
-		// List resources to trigger parsing
-		_, err = provider.ListResources(context.Background(), domain.KindComputeInstance)
-
-		// Assert
+	t.Run("Directory with Only Non-HCL Files", func(t *testing.T) {
+		dir := createTestDir(t)
+		defer cleanupTestDir(t, dir)
+		createTestHCLFile(t, dir, "README.md", `# Test`)
+		_, _, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "no valid HCL files")
+		assert.Contains(t, err.Error(), "no HCL files (.tf, .tf.json) found")
 	})
 
-	t.Run("parse multiple resources", func(t *testing.T) {
-		multiResDir := filepath.Join(tempDir, "multiple")
-		err := os.Mkdir(multiResDir, 0755)
-		require.NoError(t, err)
+	t.Run("Syntax Error in One File", func(t *testing.T) {
+		dir := createTestDir(t)
+		defer cleanupTestDir(t, dir)
+		path1 := createTestHCLFile(t, dir, "good.tf", `resource "t" "good" {}`)
+		createTestHCLFile(t, dir, "bad.tf", `resource "t" "bad" { = }`) // Syntax error
 
-		// Create a file with multiple resources
-		multiResHCL := `
-resource "aws_instance" "web1" {
-  ami           = "ami-11111"
-  instance_type = "t2.micro"
-}
+		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
+		require.Error(t, err) // Returns fatal error because one file failed parsing critically
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
+		assert.Contains(t, diags.Error(), "bad.tf")
+		assert.Contains(t, diags.Error(), "Operator expected") // Example syntax error detail
+		require.NotNil(t, filesMap)                            // Should still return map with successfully parsed files
+		assert.Contains(t, filesMap, path1)                    // Good file should be present
+		assert.Len(t, filesMap, 1)                             // Only the good file
+	})
 
-resource "aws_instance" "web2" {
-  ami           = "ami-22222"
-  instance_type = "t2.large"
-}
+	t.Run("Invalid JSON in TF.JSON File", func(t *testing.T) {
+		dir := createTestDir(t)
+		defer cleanupTestDir(t, dir)
+		createTestHCLFile(t, dir, "bad.tf.json", `{"resource": {"t": {"json": {}}`) // Missing closing brace
 
-resource "aws_s3_bucket" "data" {
-  bucket = "test-bucket"
-  acl    = "private"
-}
-`
-		err = os.WriteFile(filepath.Join(multiResDir, "multi.tf"), []byte(multiResHCL), 0644)
-		require.NoError(t, err)
-
-		// Create the provider which will parse this directory
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(tfhcl.Config{
-			Directory: multiResDir,
-		}, mockLogger)
-		require.NoError(t, err)
-
-		// List compute instances
-		computeResources, err := provider.ListResources(context.Background(), domain.KindComputeInstance)
-		require.NoError(t, err)
-		assert.Len(t, computeResources, 2)
-
-		// Extract identifiers to check both instances were found
-		identifiers := []string{
-			computeResources[0].Metadata().SourceIdentifier,
-			computeResources[1].Metadata().SourceIdentifier,
-		}
-		assert.Contains(t, identifiers, "aws_instance.web1")
-		assert.Contains(t, identifiers, "aws_instance.web2")
-
-		// List storage buckets
-		storageResources, err := provider.ListResources(context.Background(), domain.KindStorageBucket)
-		require.NoError(t, err)
-		assert.Len(t, storageResources, 1)
-		assert.Equal(t, "aws_s3_bucket.data", storageResources[0].Metadata().SourceIdentifier)
+		filesMap, diags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
+		require.Error(t, err)
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
+		assert.Contains(t, diags.Error(), "bad.tf.json")
+		assert.Contains(t, diags.Error(), "Syntax error") // JSON syntax error detail
+		assert.Empty(t, filesMap)                         // No files parsed successfully
 	})
 }
 
-// TestExtractLiteralAttributes tests the parser's ability to extract literal attribute values
-func TestExtractLiteralAttributes(t *testing.T) {
-	// Since extractLiteralAttributes is an internal function, we'll test it indirectly
-	// through the provider's ListResources method
+func TestFindResourceBlocks(t *testing.T) {
+	mockLogger := testutil.NewMockLogger()
+	ctx := context.Background()
+	dir := createTestDir(t)
+	defer cleanupTestDir(t, dir)
 
-	tempDir := t.TempDir()
+	path1 := createTestHCLFile(t, dir, "f1.tf", `
+        resource "aws_instance" "web1" { ami = "ami-1" }
+        resource "aws_s3_bucket" "logs" { bucket = "log-bucket" }
+    `)
+	path2 := createTestHCLFile(t, dir, "f2.tf", `
+        resource "aws_instance" "web2" { ami = "ami-2" }
+        resource "aws_instance" "web1" { instance_type = "t3.micro" }
+    `)
+	createTestHCLFile(t, dir, "f3.tf.json", `
+        {"resource": {"aws_instance": {"web3": {"ami": "ami-3"}}}}
+    `)
 
-	t.Run("extract different attribute types", func(t *testing.T) {
-		// Create a temporary HCL file with different attribute types
-		typesHCL := `
-resource "aws_instance" "types_test" {
-  string_attr  = "string value"
-  number_attr  = 42
-  bool_attr    = true
-  list_attr    = ["item1", "item2"]
-  // List and map attributes won't be extracted by the literal attribute extractor
-}
-`
-		err := os.WriteFile(filepath.Join(tempDir, "types.tf"), []byte(typesHCL), 0644)
-		require.NoError(t, err)
+	filesMap, parseDiags, err := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger)
+	require.NoError(t, err)
+	require.False(t, evaluator.DiagsHasFatalErrors(parseDiags))
 
-		// Create the provider which will parse this directory
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(tfhcl.Config{
-			Directory: tempDir,
-		}, mockLogger)
-		require.NoError(t, err)
-
-		// List resources to trigger parsing and attribute extraction
-		resources, err := provider.ListResources(context.Background(), domain.KindComputeInstance)
-
-		// Assert
-		require.NoError(t, err)
-		require.Len(t, resources, 1)
-
-		// The values should be in the normalized domain attributes
-		// We can't directly test extractLiteralAttributes, but we can verify
-		// string and primitive attributes were extracted
-		attrs := resources[0].Attributes()
-
-		// These come from the mapping process, so just check they're correct in the mapped output
-		// Verify the attribute extraction pipeline worked
-		tags, ok := attrs[domain.KeyTags].(map[string]string)
-		require.True(t, ok)
-		assert.Empty(t, tags, "Tags should be empty for this test case")
+	t.Run("Find aws_instance", func(t *testing.T) {
+		blocks, addresses, findDiags := tfhcl.FindResourceBlocks(filesMap, domain.KindComputeInstance)
+		assert.True(t, findDiags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(findDiags))
+		assert.Contains(t, findDiags.Error(), "Duplicate resource address")
+		assert.Len(t, blocks, 3) // Check count found
+		assert.Len(t, addresses, 3)
+		assert.Contains(t, addresses, "aws_instance.web1")
+		assert.Contains(t, addresses, "aws_instance.web2")
+		assert.Contains(t, addresses, "aws_instance.web3")
+		assert.Equal(t, fmt.Sprintf("%s::%s", path1, "aws_instance.web1"), addresses["aws_instance.web1"])
+		assert.Equal(t, fmt.Sprintf("%s::%s", path2, "aws_instance.web2"), addresses["aws_instance.web2"])
+		// Note: Duplicate web1 from path2 is skipped, address maps to the one from path1
 	})
+
+	t.Run("Find aws_s3_bucket", func(t *testing.T) {
+		blocks, addresses, findDiags := tfhcl.FindResourceBlocks(filesMap, domain.KindStorageBucket)
+		assert.False(t, findDiags.HasErrors())
+		assert.Len(t, blocks, 1)
+		assert.Equal(t, "aws_s3_bucket", blocks[0].Labels[0])
+		assert.Len(t, addresses, 1)
+		assert.Contains(t, addresses, "aws_s3_bucket.logs")
+		assert.Equal(t, fmt.Sprintf("%s::%s", path1, "aws_s3_bucket.logs"), addresses["aws_s3_bucket.logs"])
+	})
+
+	t.Run("Kind Not Found", func(t *testing.T) {
+		blocks, _, findDiags := tfhcl.FindResourceBlocks(filesMap, domain.KindDatabaseInstance)
+		assert.False(t, findDiags.HasErrors())
+		assert.Empty(t, blocks)
+	})
+}
+
+func TestFindSpecificResourceBlock(t *testing.T) {
+	mockLogger := testutil.NewMockLogger()
+	ctx := context.Background()
+	dir := createTestDir(t)
+	defer cleanupTestDir(t, dir)
+
+	createTestHCLFile(t, dir, "f2.tf", `resource "aws_instance" "another" { ami = "f2-ami" }`)
+	createTestHCLFile(t, dir, "f3_dup.tf", `resource "aws_instance" "specific" { ami = "f3-ami" }`) // Duplicate
+
+	filesMap, _, _ := tfhcl.ParseHCLDirectory(ctx, dir, mockLogger) // Ignore diags/err for this test focus
+
+	t.Run("Found", func(t *testing.T) {
+		block, diags := tfhcl.FindSpecificResourceBlock(filesMap, "aws_instance.another")
+		assert.False(t, diags.HasErrors(), diags.Error())
+		require.NotNil(t, block)
+		assert.Equal(t, "aws_instance", block.Labels[0])
+		assert.Equal(t, "another", block.Labels[1])
+	})
+
+	t.Run("Duplicate Found", func(t *testing.T) {
+		block, diags := tfhcl.FindSpecificResourceBlock(filesMap, "aws_instance.specific")
+		assert.True(t, diags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
+		assert.Contains(t, diags.Error(), "Duplicate resource definition")
+		assert.Contains(t, diags.Error(), "aws_instance.specific")
+		assert.Nil(t, block) // Should return nil on fatal duplicate error
+	})
+
+	t.Run("Not Found", func(t *testing.T) {
+		block, diags := tfhcl.FindSpecificResourceBlock(filesMap, "aws_instance.nonexistent")
+		assert.False(t, diags.HasErrors())
+		assert.Nil(t, block)
+	})
+
+	t.Run("Invalid Identifier Format", func(t *testing.T) {
+		block, diags := tfhcl.FindSpecificResourceBlock(filesMap, "aws_instance-invalid")
+		assert.True(t, diags.HasErrors())
+		assert.True(t, evaluator.DiagsHasFatalErrors(diags))
+		assert.Contains(t, diags.Error(), "Invalid resource identifier")
+		assert.Nil(t, block)
+	})
+}
+
+// Cleanup helper
+func cleanupTestDir(t *testing.T, dir string) {
+	t.Helper()
+	os.RemoveAll(dir)
 }

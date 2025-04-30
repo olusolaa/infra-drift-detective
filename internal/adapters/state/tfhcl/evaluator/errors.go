@@ -6,13 +6,11 @@ import (
 	"github.com/hashicorp/hcl/v2"
 )
 
-// EvaluatedResource represents the evaluated attributes and blocks of a resource.
-type EvaluatedResource map[string]any
+type EvaluatedResource map[string]interface{}
 
-// HCLDiagnosticsError wraps HCL diagnostics for clearer error propagation.
 type HCLDiagnosticsError struct {
 	Operation string
-	FilePath  string // Can represent the directory or primary file involved
+	FilePath  string
 	Diags     hcl.Diagnostics
 }
 
@@ -20,10 +18,9 @@ func (e *HCLDiagnosticsError) Error() string {
 	return fmt.Sprintf("HCL %s error processing %q: %s", e.Operation, e.FilePath, e.Diags.Error())
 }
 
-// VariableLoadError indicates failure loading a .tfvars file.
 type VariableLoadError struct {
 	VarFilePath string
-	Err         error // Underlying error (e.g., file read, parse diag)
+	Err         error
 }
 
 func (e *VariableLoadError) Error() string {
@@ -31,9 +28,8 @@ func (e *VariableLoadError) Error() string {
 }
 func (e *VariableLoadError) Unwrap() error { return e.Err }
 
-// ValueConversionError indicates failure converting cty.Value to a Go type.
 type ValueConversionError struct {
-	AttributeName string // Optional: Attribute where conversion failed
+	AttributeName string
 	Err           error
 }
 
@@ -45,7 +41,6 @@ func (e *ValueConversionError) Error() string {
 }
 func (e *ValueConversionError) Unwrap() error { return e.Err }
 
-// ResourceEvaluationError indicates failure during resource block evaluation, wrapping diagnostics.
 type ResourceEvaluationError struct {
 	Address string
 	Diags   hcl.Diagnostics

@@ -1,118 +1,149 @@
-package tfhcl_test
+package tfhcl
 
 import (
-	"context"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
 	"testing"
 
+	"fmt" // Need fmt
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator"
+	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
-	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 )
 
-// TestMapHCLBlockToDomain tests the mapping of HCL blocks to domain resources
-func TestMapHCLBlockToDomain(t *testing.T) {
-	// Since mapHCLBlockToDomain is an internal function, we'll test it indirectly
-	// through the provider's ListResources and GetResource methods
-
-	t.Run("map compute instance block", func(t *testing.T) {
-		// Setup
-		cfg := tfhcl.Config{
-			Directory: "testdata",
+func TestMapEvaluatedHCLToDomain(t *testing.T) {
+	t.Run("Map aws_instance", func(t *testing.T) {
+		address := "aws_instance.web"
+		evaluatedAttrs := evaluator.EvaluatedResource{
+			"ami":           "ami-12345",
+			"instance_type": "t3.medium",
+			"tags": map[string]interface{}{
+				"Name":        "web-server",
+				"Environment": "prod",
+				"CostCenter":  float64(12345), // Input number as float64
+				"Flag":        true,           // Input bool
+			},
+			"root_block_device": []any{
+				map[string]interface{}{
+					"volume_size": float64(50),
+					"encrypted":   "true", // Input bool as string
+				},
+			},
+			"ebs_block_device": []any{
+				map[string]interface{}{
+					"device_name": "/dev/sdf",
+					"volume_size": "100", // Input number as string
+				},
+			},
 		}
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(cfg, mockLogger)
+
+		stateRes, err := tfhcl.MapEvaluatedHCLToDomain(domain.KindComputeInstance, address, evaluatedAttrs)
 		require.NoError(t, err)
+		require.NotNil(t, stateRes)
 
-		// Test via ListResources
-		resources, err := provider.ListResources(context.Background(), domain.KindComputeInstance)
-		require.NoError(t, err)
-		require.Len(t, resources, 1)
+		meta := stateRes.Metadata()
+		assert.Equal(t, domain.KindComputeInstance, meta.Kind)
+		assert.Equal(t, address, meta.SourceIdentifier)
+		assert.Equal(t, "aws", meta.ProviderType)
 
-		// Assert mappings
-		resource := resources[0]
-		assert.Equal(t, domain.KindComputeInstance, resource.Metadata().Kind)
-		assert.Equal(t, "aws", resource.Metadata().ProviderType)
-		assert.Equal(t, "aws_instance.web", resource.Metadata().SourceIdentifier)
+		attrs := stateRes.Attributes()
+		require.NotNil(t, attrs)
+		assert.Equal(t, "ami-12345", attrs[domain.ComputeImageIDKey])
+		assert.Equal(t, "t3.medium", attrs[domain.ComputeInstanceTypeKey])
 
-		// Check specific mappings
-		attrs := resource.Attributes()
-		assert.Equal(t, "t2.micro", attrs[domain.ComputeInstanceTypeKey])
-		assert.Equal(t, "ami-0c55b159cbfafe1f0", attrs[domain.ComputeImageIDKey])
-		assert.Equal(t, "subnet-12345678", attrs[domain.ComputeSubnetIDKey])
-
-		// Check tags
 		tags, ok := attrs[domain.KeyTags].(map[string]string)
-		require.True(t, ok)
-		assert.Equal(t, "WebServer", tags["Name"])
-		assert.Equal(t, "production", tags["Environment"])
+		require.True(t, ok, "Tags should be map[string]string after normalization")
+		assert.Equal(t, "web-server", tags["Name"])
+		assert.Equal(t, "prod", tags["Environment"])
+		assert.Equal(t, "12345", tags["CostCenter"]) // Check normalized string value
+		assert.Equal(t, "true", tags["Flag"])        // Check normalized string value
+		assert.Equal(t, "web-server", attrs[domain.KeyName])
 
-		// Ensure Name is set from tags
-		assert.Equal(t, "WebServer", attrs[domain.KeyName])
+		rootBlock, ok := attrs[domain.ComputeRootBlockDeviceKey].(map[string]any)
+		require.True(t, ok, "Root block device should be map[string]any")
+		// Check normalized values
+		var rootSize int64 // Use int64 as normalization target type
+		require.NoError(t, convertToInt64(rootBlock["volume_size"], &rootSize))
+		assert.Equal(t, int64(50), rootSize)
+		assert.Equal(t, true, rootBlock["encrypted"])
+		assert.Equal(t, true, rootBlock["delete_on_termination"])
+
+		ebsSlice, ok := attrs[domain.ComputeEBSBlockDevicesKey].([]map[string]any)
+		require.True(t, ok)
+		require.Len(t, ebsSlice, 1)
+		ebsBlock := ebsSlice[0]
+		assert.Equal(t, "/dev/sdf", ebsBlock["device_name"])
+		var ebsSize int64 // Use int64
+		require.NoError(t, convertToInt64(ebsBlock["volume_size"], &ebsSize))
+		assert.Equal(t, int64(100), ebsSize)
+		assert.Equal(t, false, ebsBlock["delete_on_termination"])
 	})
 
-	t.Run("map storage bucket block", func(t *testing.T) {
-		// Setup
-		cfg := tfhcl.Config{
-			Directory: "testdata",
+	t.Run("Map Empty Evaluated Attrs", func(t *testing.T) {
+		address := "aws_instance.empty"
+		evaluatedAttrs := evaluator.EvaluatedResource{}
+
+		stateRes, err := tfhcl.MapEvaluatedHCLToDomain(domain.KindComputeInstance, address, evaluatedAttrs)
+		require.NoError(t, err)
+		require.NotNil(t, stateRes)
+		attrs := stateRes.Attributes()
+		require.NotNil(t, attrs)
+		assert.Nil(t, attrs[domain.KeyName])
+		assert.Nil(t, attrs[domain.KeyID])
+	})
+
+	t.Run("Mapping Error on Normalize", func(t *testing.T) {
+		address := "aws_instance.bad_norm"
+		evaluatedAttrs := evaluator.EvaluatedResource{
+			"tags": 123, // Invalid type for tags (number)
 		}
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(cfg, mockLogger)
-		require.NoError(t, err)
-
-		// Test via GetResource
-		resource, err := provider.GetResource(context.Background(), domain.KindStorageBucket, "aws_s3_bucket.data")
-		require.NoError(t, err)
-
-		// Assert mappings
-		assert.Equal(t, domain.KindStorageBucket, resource.Metadata().Kind)
-		assert.Equal(t, "aws", resource.Metadata().ProviderType)
-		assert.Equal(t, "aws_s3_bucket.data", resource.Metadata().SourceIdentifier)
-
-		// Check specific mappings
-		attrs := resource.Attributes()
-		assert.Equal(t, "private", attrs[domain.StorageBucketACLKey])
-
-		// Check versioning is mapped
-		versioning, ok := attrs[domain.StorageBucketVersioningKey].(bool)
-		require.True(t, ok)
-		assert.True(t, versioning)
-
-		// Check tags
-		tags, ok := attrs[domain.KeyTags].(map[string]string)
-		require.True(t, ok)
-		assert.Equal(t, "DataBucket", tags["Name"])
-		assert.Equal(t, "production", tags["Environment"])
-
-		// Ensure Name is set from tags
-		assert.Equal(t, "DataBucket", attrs[domain.KeyName])
+		_, err := tfhcl.MapEvaluatedHCLToDomain(domain.KindComputeInstance, address, evaluatedAttrs)
+		// Expect error from normalizeAndCopyAttributes -> normalizeTags
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "failed normalizing evaluated HCL attributes")
+		assert.Contains(t, err.Error(), "invalid type for tags") // Check underlying error message
 	})
 }
 
-// TestTfHCLResource tests the implementation of the domain.StateResource interface
-func TestTfHCLResource(t *testing.T) {
-	t.Run("resource implementation", func(t *testing.T) {
-		// Setup
-		cfg := tfhcl.Config{
-			Directory: "testdata",
-		}
-		mockLogger := NewTestLogger()
-		provider, err := tfhcl.NewProvider(cfg, mockLogger)
-		require.NoError(t, err)
-
-		// Get a resource
-		resource, err := provider.GetResource(context.Background(), domain.KindComputeInstance, "aws_instance.web")
-		require.NoError(t, err)
-
-		// Test the interface methods
-		metadata := resource.Metadata()
-		assert.Equal(t, domain.KindComputeInstance, metadata.Kind)
-		assert.Equal(t, "aws_instance.web", metadata.SourceIdentifier)
-
-		attrs := resource.Attributes()
-		assert.NotEmpty(t, attrs)
-		assert.Contains(t, attrs, domain.ComputeInstanceTypeKey)
-		assert.Equal(t, "t2.micro", attrs[domain.ComputeInstanceTypeKey])
-	})
+func convertToInt64(value interface{}, target *int64) error {
+	switch v := value.(type) {
+	case int:
+		*target = int64(v)
+		return nil
+	case int8:
+		*target = int64(v)
+		return nil
+	case int16:
+		*target = int64(v)
+		return nil
+	case int32:
+		*target = int64(v)
+		return nil
+	case int64:
+		*target = v
+		return nil
+	case uint:
+		*target = int64(v)
+		return nil
+	case uint8:
+		*target = int64(v)
+		return nil
+	case uint16:
+		*target = int64(v)
+		return nil
+	case uint32:
+		*target = int64(v)
+		return nil
+	case uint64:
+		*target = int64(v)
+		return nil // Potential overflow ignored here
+	case float32:
+		*target = int64(v)
+		return nil
+	case float64:
+		*target = int64(v)
+		return nil
+	default:
+		return fmt.Errorf("cannot convert type %T to int64", value)
+	}
 }

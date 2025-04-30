@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -75,10 +74,7 @@ func BuildEvalContext(
 	}
 
 	// --- Evaluate Locals ---
-	// Create a special wrapper body that allows any block type
-	wrappedBody := &terraformHclBody{original: mergedBody}
-
-	localsVal, localsDiags := evaluateLocals(wrappedBody, evalCtx, logger)
+	localsVal, localsDiags := evaluateLocals(mergedBody, evalCtx, logger)
 	mergedDiags = append(mergedDiags, localsDiags...)
 	if localsDiags.HasErrors() {
 		// Log actual error object
@@ -103,88 +99,7 @@ func BuildEvalContext(
 	}
 
 	logger.Debugf(ctx, "Successfully built evaluation context")
-	return evalCtx, mergedDiags
-}
-
-// terraformHclBody is a wrapper around hcl.Body that accepts any block type, specifically for context building
-type terraformHclBody struct {
-	original hcl.Body
-}
-
-// Content implements hcl.Body
-func (tfb *terraformHclBody) Content(schema *hcl.BodySchema) (*hcl.BodyContent, hcl.Diagnostics) {
-	// Use an open schema that accepts any block type, including 'resource' blocks
-	openSchema := &hcl.BodySchema{
-		Attributes: schema.Attributes,
-		Blocks: append(schema.Blocks, hcl.BlockHeaderSchema{
-			Type:       "resource",
-			LabelNames: []string{"type", "name"},
-		}, hcl.BlockHeaderSchema{
-			Type: "locals",
-		}, hcl.BlockHeaderSchema{
-			// Wildcard block type
-			Type:       "",
-			LabelNames: nil,
-		}),
-	}
-
-	content, diags := tfb.original.Content(openSchema)
-
-	var filteredDiags hcl.Diagnostics
-	for _, diag := range diags {
-		if !strings.Contains(diag.Summary, "Unsupported block type") &&
-			!strings.Contains(diag.Detail, "Blocks of type") &&
-			!strings.Contains(diag.Detail, "are not expected here") {
-			filteredDiags = append(filteredDiags, diag)
-		}
-	}
-
-	return content, filteredDiags
-}
-
-// PartialContent implements hcl.Body
-func (tfb *terraformHclBody) PartialContent(schema *hcl.BodySchema) (*hcl.BodyContent, hcl.Body, hcl.Diagnostics) {
-	// Use an open schema that accepts any block type, including 'resource' blocks
-	openSchema := &hcl.BodySchema{
-		Attributes: schema.Attributes,
-		Blocks: append(schema.Blocks, hcl.BlockHeaderSchema{
-			Type:       "resource",
-			LabelNames: []string{"type", "name"},
-		}, hcl.BlockHeaderSchema{
-			Type: "locals",
-		}, hcl.BlockHeaderSchema{
-			// Wildcard block type
-			Type:       "",
-			LabelNames: nil,
-		}),
-	}
-
-	content, remain, diags := tfb.original.PartialContent(openSchema)
-
-	// Filter diagnostics to remove "Unsupported block type" errors
-	var filteredDiags hcl.Diagnostics
-	for _, diag := range diags {
-		if !strings.Contains(diag.Summary, "Unsupported block type") &&
-			!strings.Contains(diag.Detail, "Blocks of type") &&
-			!strings.Contains(diag.Detail, "are not expected here") {
-			filteredDiags = append(filteredDiags, diag)
-		}
-	}
-
-	// Wrap the remaining body
-	wrappedRemain := &terraformHclBody{original: remain}
-
-	return content, wrappedRemain, filteredDiags
-}
-
-// JustAttributes implements hcl.Body
-func (tfb *terraformHclBody) JustAttributes() (hcl.Attributes, hcl.Diagnostics) {
-	return tfb.original.JustAttributes()
-}
-
-// MissingItemRange implements hcl.Body
-func (tfb *terraformHclBody) MissingItemRange() hcl.Range {
-	return tfb.original.MissingItemRange()
+	return evalCtx, mergedDiags // Return context even with warnings
 }
 
 // loadVariables loads a single .tfvars file.

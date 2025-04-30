@@ -1,4 +1,4 @@
-package tfhcl_test
+package testutil
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func (m *MockLogger) WithFields(fields map[string]any) ports.Logger {
 }
 
 // NewTestLogger creates a new MockLogger with basic mocking set up
-func NewTestLogger() *MockLogger {
+func NewMockLogger() *MockLogger {
 	mockLogger := new(MockLogger)
 	mockLogger.On("WithFields", mock.Anything).Return(mockLogger)
 	mockLogger.On("Debugf", mock.Anything, mock.Anything, mock.Anything).Return()
