@@ -1,11 +1,10 @@
-package tfhcl
+package tfhcl_test
 
 import (
 	"context"
 	"fmt"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
 	"github.com/olusolaa/infra-drift-detector/test/testutil"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,26 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func createTestDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "tfhcl-parser-test-")
-	require.NoError(t, err)
-	return dir
-}
-
-func createTestHCLFile(t *testing.T, dir, filename, content string) string {
-	t.Helper()
-	filePath := filepath.Join(dir, filename)
-	err := os.WriteFile(filePath, []byte(content), 0644)
-	require.NoError(t, err)
-	return filePath
-}
-
-func cleanupTestDir(t *testing.T, dir string) {
-	t.Helper()
-	os.RemoveAll(dir)
-}
 
 func TestParseHCLDirectory(t *testing.T) {
 	mockLogger := testutil.NewMockLogger()

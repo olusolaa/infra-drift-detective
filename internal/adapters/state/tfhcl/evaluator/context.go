@@ -68,11 +68,21 @@ func BuildEvalContext(
 		Functions: funcs,
 	}
 
-	localsSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "locals"}}}
-	localsContent, contentDiags := mergedBody.Content(localsSchema)
+	permissiveSchema := &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{Type: "locals"},
+			{Type: "resource", LabelNames: []string{"type", "name"}},
+			{Type: "provider", LabelNames: []string{"name"}},
+			{Type: "variable", LabelNames: []string{"name"}},
+			{Type: "output", LabelNames: []string{"name"}},
+			{Type: "terraform"},
+			{Type: "data", LabelNames: []string{"type", "name"}},
+		},
+	}
+	fullContent, contentDiags := mergedBody.Content(permissiveSchema)
 	mergedDiags = append(mergedDiags, contentDiags...)
 
-	localsVal, localsDiags := evaluateLocalsFromContent(localsContent, evalCtx, logger)
+	localsVal, localsDiags := evaluateLocalsFromContent(fullContent, evalCtx, logger)
 	mergedDiags = append(mergedDiags, localsDiags...)
 	if DiagsHasFatalErrors(localsDiags) {
 		logger.Errorf(ctx, &HCLDiagnosticsError{Operation: "evaluating locals", FilePath: baseDir, Diags: localsDiags}, "Error evaluating locals block")
@@ -114,13 +124,13 @@ func loadVariables(varsFilePath string, logger ports.Logger) (map[string]cty.Val
 		diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Internal HCL parsing error", Detail: "Parser returned nil file without diagnostics.", Subject: &hcl.Range{Filename: varsFilePath}})
 		logger.Errorf(nil, errors.New(diags.Error()), "Internal parser error loading variables")
 	}
-	if file == nil || diags.HasErrors() {
+	if file == nil || DiagsHasFatalErrors(diags) {
 		return nil, diags
 	}
 
 	attrs, attrDiags := file.Body.JustAttributes()
 	diags = append(diags, attrDiags...)
-	if diags.HasErrors() {
+	if DiagsHasFatalErrors(attrDiags) {
 		return nil, diags
 	}
 
@@ -128,7 +138,7 @@ func loadVariables(varsFilePath string, logger ports.Logger) (map[string]cty.Val
 	for name, attr := range attrs {
 		val, valDiags := attr.Expr.Value(evalCtx)
 		diags = append(diags, valDiags...)
-		if !valDiags.HasErrors() {
+		if !DiagsHasFatalErrors(valDiags) {
 			vars[name] = val
 		}
 	}
@@ -140,6 +150,10 @@ func evaluateLocalsFromContent(content *hcl.BodyContent, ctx *hcl.EvalContext, l
 	var allLocalsDiags hcl.Diagnostics
 	locals := make(map[string]cty.Value)
 	definedLocals := make(map[string]hcl.Range)
+
+	if content == nil {
+		return cty.EmptyObjectVal, allLocalsDiags
+	}
 
 	for _, block := range content.Blocks {
 		if block.Type != "locals" {

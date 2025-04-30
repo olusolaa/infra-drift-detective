@@ -82,20 +82,31 @@ func FindResourceBlocks(
 	addresses = make(map[string]string)
 	resourceSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource", LabelNames: []string{"type", "name"}}}}
 	foundAddresses := make(map[string]string)
+	stopProcessing := false
 
 	for path, file := range hclFiles {
+		if stopProcessing {
+			break
+		}
 		if file == nil || file.Body == nil {
 			continue
 		}
+
 		content, contentDiags := file.Body.Content(resourceSchema)
 		diags = append(diags, contentDiags...)
+		if evaluator.DiagsHasFatalErrors(contentDiags) {
+			stopProcessing = true
+			continue
+		}
 
 		for _, block := range content.Blocks {
+			if stopProcessing {
+				break
+			}
 			if block.Type == "resource" && len(block.Labels) == 2 {
 				tfType := block.Labels[0]
 				tfName := block.Labels[1]
 				address := fmt.Sprintf("%s.%s", tfType, tfName)
-
 				kind, err := mapping.MapTfTypeToDomainKind(tfType)
 				if err != nil {
 					continue
@@ -104,8 +115,9 @@ func FindResourceBlocks(
 				if kind == requestedKind {
 					blockUniqueID := fmt.Sprintf("%s::%s", path, address)
 					if firstPath, exists := foundAddresses[address]; exists {
-						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource address", Detail: fmt.Sprintf("Resource %s defined in %s and %s.", address, firstPath, path), Subject: &block.DefRange})
-					} else {
+						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource address", Detail: fmt.Sprintf("Resource %s defined multiple times (found in %s and %s).", address, firstPath, path), Subject: &block.DefRange})
+						stopProcessing = true
+					} else if !stopProcessing {
 						blocks = append(blocks, block)
 						addresses[address] = blockUniqueID
 						foundAddresses[address] = path
@@ -136,6 +148,9 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 		}
 		content, contentDiags := file.Body.Content(resourceSchema)
 		diags = append(diags, contentDiags...)
+		if evaluator.DiagsHasFatalErrors(contentDiags) {
+			return nil, diags
+		}
 
 		for _, block := range content.Blocks {
 			if block.Type == "resource" && len(block.Labels) == 2 {
@@ -151,6 +166,9 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 				}
 			}
 		}
+	}
+	if evaluator.DiagsHasFatalErrors(diags) {
+		return nil, diags
 	}
 	return foundBlock, diags
 }

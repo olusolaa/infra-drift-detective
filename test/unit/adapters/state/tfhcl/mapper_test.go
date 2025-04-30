@@ -1,4 +1,4 @@
-package tfhcl
+package tfhcl_test
 
 import (
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"

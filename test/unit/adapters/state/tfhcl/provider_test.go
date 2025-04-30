@@ -1,4 +1,4 @@
-package tfhcl
+package tfhcl_test
 
 import (
 	"context"
@@ -14,6 +14,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func createTestHCLFile(t *testing.T, dir, filename, content string) string {
+	t.Helper()
+	filePath := filepath.Join(dir, filename)
+	err := os.WriteFile(filePath, []byte(content), 0644)
+	require.NoError(t, err, "Failed to write test HCL file: %s", filename)
+	return filePath
+}
+
+func createTestDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tfhcl-provider-test-")
+	require.NoError(t, err, "Failed to create temp dir for testing")
+	return dir
+}
+
+func cleanupTestDir(t *testing.T, dir string) {
+	t.Helper()
+	os.RemoveAll(dir)
+}
 
 type testHCLProvider struct {
 	provider *tfhcl.Provider
@@ -32,11 +52,15 @@ func setupHCLTestProvider(t *testing.T, cfg tfhcl.Config) *testHCLProvider {
 	require.NoError(t, err)
 	cfg.Directory = absDir
 
+	absVarFiles := make([]string, len(cfg.VarFiles))
 	for i, vf := range cfg.VarFiles {
 		if vf != "" && !filepath.IsAbs(vf) {
-			cfg.VarFiles[i] = filepath.Join(cfg.Directory, filepath.Base(vf))
+			absVarFiles[i] = filepath.Join(cfg.Directory, filepath.Base(vf))
+		} else if vf != "" {
+			absVarFiles[i] = vf
 		}
 	}
+	cfg.VarFiles = absVarFiles
 
 	p, err := tfhcl.NewProvider(cfg, mockLogger)
 	require.NoError(t, err)
@@ -168,13 +192,14 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 		defer cleanupTestDir(t, dir)
 		createTestHCLFile(t, dir, "bad.tf", `resource "a" "b" { = }`)
 		p, _ := tfhcl.NewProvider(tfhcl.Config{Directory: dir}, mockLogger)
+		require.NotNil(t, p)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
 		var appErr *errors.AppError
 		require.True(t, errors.As(err, &appErr))
-		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
+		assert.Equal(t, errors.CodeStateReadError, appErr.Code)
 		var diagErr *evaluator.HCLDiagnosticsError
-		require.True(t, errors.As(err, &diagErr)) // Inner wrap
+		require.True(t, errors.As(err, &diagErr))
 		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
 		assert.Contains(t, diagErr.Diags.Error(), "bad.tf")
 	})
@@ -189,7 +214,7 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 		require.Error(t, err)
 		var appErr *errors.AppError
 		require.True(t, errors.As(err, &appErr))
-		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
+		assert.Equal(t, errors.CodeStateReadError, appErr.Code)
 		var diagErr *evaluator.HCLDiagnosticsError
 		require.True(t, errors.As(err, &diagErr))
 		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
@@ -273,7 +298,6 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
                 instance_type = var.no_such_var
             }
         `)
-
 		mockLogger := testutil.NewMockLogger()
 		p, _ := tfhcl.NewProvider(cfg, mockLogger)
 
@@ -301,7 +325,7 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 		require.Error(t, err)
 		var appErr *errors.AppError
 		require.True(t, errors.As(err, &appErr))
-		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
+		assert.Equal(t, errors.CodeStateParseError, appErr.Code) // Wrap code indicates init/parse phase failure
 		var diagErr *evaluator.HCLDiagnosticsError
 		require.True(t, errors.As(err, &diagErr), "Error should wrap HCLDiagnosticsError from findSpecific")
 		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
