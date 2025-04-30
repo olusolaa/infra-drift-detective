@@ -80,14 +80,17 @@ func FindResourceBlocks(
 
 	blocks = make([]*hcl.Block, 0)
 	addresses = make(map[string]string)
-	resourceSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource", LabelNames: []string{"type", "name"}}}}
-	foundAddresses := make(map[string]string)
-	stopProcessing := false
+	resourceSchema := &hcl.BodySchema{
+		Blocks: []hcl.BlockHeaderSchema{
+			{Type: "resource", LabelNames: []string{"type", "name"}},
+			{Type: "locals", LabelNames: []string{}},
+			{Type: "variable", LabelNames: []string{"name"}},
+			// Add other top-level blocks if necessary (e.g., provider, data, output)
+		},
+	}
+	foundAddresses := make(map[string]string) // map[address] -> first path seen
 
 	for path, file := range hclFiles {
-		if stopProcessing {
-			break
-		}
 		if file == nil || file.Body == nil {
 			continue
 		}
@@ -95,36 +98,67 @@ func FindResourceBlocks(
 		content, contentDiags := file.Body.Content(resourceSchema)
 		diags = append(diags, contentDiags...)
 		if evaluator.DiagsHasFatalErrors(contentDiags) {
-			stopProcessing = true
+			// If fatal error during content extraction for this file, record it and continue to next file.
+			// Do not stop processing other files entirely unless necessary.
 			continue
 		}
 
 		for _, block := range content.Blocks {
-			if stopProcessing {
-				break
-			}
 			if block.Type == "resource" && len(block.Labels) == 2 {
 				tfType := block.Labels[0]
 				tfName := block.Labels[1]
 				address := fmt.Sprintf("%s.%s", tfType, tfName)
 				kind, err := mapping.MapTfTypeToDomainKind(tfType)
 				if err != nil {
+					// Log or add diagnostic for unmappable type? Maybe not here.
 					continue
 				}
 
 				if kind == requestedKind {
 					blockUniqueID := fmt.Sprintf("%s::%s", path, address)
 					if firstPath, exists := foundAddresses[address]; exists {
-						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource address", Detail: fmt.Sprintf("Resource %s defined multiple times (found in %s and %s).", address, firstPath, path), Subject: &block.DefRange})
-						stopProcessing = true
-					} else if !stopProcessing {
+						// Duplicate found! Add error diagnostic.
+						diags = diags.Append(&hcl.Diagnostic{
+							Severity: hcl.DiagError,
+							Summary:  "Duplicate resource address",
+							Detail:   fmt.Sprintf("Resource %s defined multiple times (first found in %s, also in %s).", address, firstPath, path),
+							Subject:  &block.DefRange, // Subject points to the current (duplicate) block
+						})
+
+						// Remove the first instance from results if it's still there
+						if _, addrExists := addresses[address]; addrExists {
+							delete(addresses, address) // Remove from address map
+
+							// Find and remove the block corresponding to the first instance (firstPath)
+							originalBlockIndex := -1
+							for i, b := range blocks {
+								// Check if block 'b' corresponds to the first instance
+								if len(b.Labels) == 2 && fmt.Sprintf("%s.%s", b.Labels[0], b.Labels[1]) == address && b.DefRange.Filename == firstPath {
+									originalBlockIndex = i
+									break
+								}
+							}
+							if originalBlockIndex != -1 {
+								// Remove block efficiently
+								blocks = append(blocks[:originalBlockIndex], blocks[originalBlockIndex+1:]...)
+							}
+						}
+						// Do not add the current block (the duplicate) or update foundAddresses/addresses.
+						// Effectively removes the address from consideration entirely.
+
+					} else {
+						// First time seeing this address, add it.
 						blocks = append(blocks, block)
 						addresses[address] = blockUniqueID
-						foundAddresses[address] = path
+						foundAddresses[address] = path // Track path for potential future duplicate detection
 					}
 				}
 			}
 		}
+	}
+	// Ensure final diags reflect fatal errors if any duplicates were found
+	if evaluator.DiagsHasFatalErrors(diags) {
+		// Potentially wrap or signal the fatal nature upstream if needed
 	}
 	return blocks, addresses, diags
 }

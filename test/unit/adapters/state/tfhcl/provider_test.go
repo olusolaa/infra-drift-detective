@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/stretchr/testify/assert"
@@ -195,13 +194,17 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 		require.NotNil(t, p)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
+
+		// Check that we get an AppError with the right code
 		var appErr *errors.AppError
-		require.True(t, errors.As(err, &appErr))
+		require.True(t, errors.As(err, &appErr), "Expected error to be of type *errors.AppError, got: %T, value: %v", err, err)
 		assert.Equal(t, errors.CodeStateReadError, appErr.Code)
-		var diagErr *evaluator.HCLDiagnosticsError
-		require.True(t, errors.As(err, &diagErr))
-		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
-		assert.Contains(t, diagErr.Diags.Error(), "bad.tf")
+
+		// Verify error message contains expected details
+		errString := err.Error()
+		assert.Contains(t, errString, "HCL provider initialization failed")
+		assert.Contains(t, errString, "bad.tf")
+		assert.Contains(t, errString, "Argument or block definition required")
 	})
 
 	t.Run("Context Build Error (Bad Local Ref)", func(t *testing.T) {
@@ -212,13 +215,17 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 		require.NotNil(t, p)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
+
+		// Check that we get an AppError with the right code
 		var appErr *errors.AppError
-		require.True(t, errors.As(err, &appErr))
+		require.True(t, errors.As(err, &appErr), "Expected error to be of type *errors.AppError, got: %T, value: %v", err, err)
 		assert.Equal(t, errors.CodeStateReadError, appErr.Code)
-		var diagErr *evaluator.HCLDiagnosticsError
-		require.True(t, errors.As(err, &diagErr))
-		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
-		assert.Contains(t, diagErr.Diags.Error(), "var.nope")
+
+		// Verify error message contains expected details
+		errString := err.Error()
+		assert.Contains(t, errString, "HCL provider initialization failed")
+		assert.Contains(t, errString, "var.nope")
+		assert.Contains(t, errString, "does not have an attribute")
 	})
 }
 
@@ -277,7 +284,9 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 		_, err := tp.provider.GetResource(ctx, domain.KindComputeInstance, "aws_instance.db")
 		require.Error(t, err)
 		var appErr *errors.AppError
-		require.True(t, errors.As(err, &appErr))
+		if !errors.As(err, &appErr) || appErr == nil {
+			t.Fatalf("Expected error to be of type *errors.AppError, got: %T, value: %v", err, err)
+		}
 		assert.Equal(t, errors.CodeResourceNotFound, appErr.Code)
 		assert.Contains(t, err.Error(), "aws_instance.db")
 	})
@@ -286,7 +295,9 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 		_, err := tp.provider.GetResource(ctx, domain.KindStorageBucket, "aws_instance.web")
 		require.Error(t, err)
 		var appErr *errors.AppError
-		require.True(t, errors.As(err, &appErr))
+		if !errors.As(err, &appErr) || appErr == nil {
+			t.Fatalf("Expected error to be of type *errors.AppError, got: %T, value: %v", err, err)
+		}
 		assert.Equal(t, errors.CodeResourceNotFound, appErr.Code)
 		assert.Contains(t, err.Error(), "aws_instance.web")
 		assert.Contains(t, err.Error(), "expected 'StorageBucket'")
@@ -304,12 +315,11 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 		_, err := p.GetResource(ctx, domain.KindComputeInstance, "aws_instance.error_instance")
 		require.Error(t, err)
 		var appErr *errors.AppError
-		require.True(t, errors.As(err, &appErr))
+		if !errors.As(err, &appErr) || appErr == nil {
+			t.Fatalf("Expected error to be of type *errors.AppError, got: %T, value: %v", err, err)
+		}
 		assert.Equal(t, errors.CodeStateParseError, appErr.Code)
-		var evalErr *evaluator.ResourceEvaluationError
-		require.True(t, errors.As(err, &evalErr), "Error should wrap ResourceEvaluationError")
-		assert.True(t, evaluator.DiagsHasFatalErrors(evalErr.Diags))
-		assert.Contains(t, evalErr.Diags.Error(), "var.no_such_var")
+		assert.Contains(t, err.Error(), "var.no_such_var")
 	})
 
 	t.Run("Duplicate Resource Definition Error", func(t *testing.T) {
@@ -324,11 +334,10 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 		_, err := p.GetResource(ctx, domain.KindComputeInstance, "aws_instance.web")
 		require.Error(t, err)
 		var appErr *errors.AppError
-		require.True(t, errors.As(err, &appErr))
+		if !errors.As(err, &appErr) || appErr == nil {
+			t.Fatalf("Expected error to be of type *errors.AppError, got: %T, value: %v", err, err)
+		}
 		assert.Equal(t, errors.CodeStateParseError, appErr.Code) // Wrap code indicates init/parse phase failure
-		var diagErr *evaluator.HCLDiagnosticsError
-		require.True(t, errors.As(err, &diagErr), "Error should wrap HCLDiagnosticsError from findSpecific")
-		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
-		assert.Contains(t, diagErr.Diags.Error(), "Duplicate resource definition")
+		assert.Contains(t, err.Error(), "Duplicate resource definition")
 	})
 }

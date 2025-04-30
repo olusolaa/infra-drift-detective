@@ -69,11 +69,7 @@ func (p *Provider) ensureInitialized(ctx context.Context) error {
 	filesMap, parseDiags, err := ParseHCLDirectory(ctx, p.Config.Directory, p.logger)
 	p.initDiags = append(p.initDiags, parseDiags...)
 	if err != nil {
-		if evaluator.DiagsHasFatalErrors(parseDiags) {
-			p.initErr = errors.Wrap(&evaluator.HCLDiagnosticsError{Operation: "parsing", FilePath: p.Config.Directory, Diags: parseDiags}, errors.CodeStateParseError, err.Error())
-		} else {
-			p.initErr = err
-		}
+		p.initErr = errors.Wrap(&evaluator.HCLDiagnosticsError{Operation: "parsing", FilePath: p.Config.Directory, Diags: parseDiags}, errors.CodeStateParseError, err.Error())
 		p.logger.Errorf(ctx, p.initErr, "Fatal HCL parsing error(s)")
 		return p.initErr
 	}
@@ -104,6 +100,12 @@ func (p *Provider) ensureInitialized(ctx context.Context) error {
 	}
 	if len(p.initDiags) > 0 {
 		p.logger.Warnf(ctx, "Non-fatal diagnostics during HCL initialization:\n%s", p.initDiags.Error())
+	}
+
+	if evalCtx == nil {
+		p.initErr = errors.New(errors.CodeStateParseError, "failed to build HCL evaluation context (context is nil)")
+		p.logger.Errorf(ctx, p.initErr, "Evaluation context is nil after build attempt")
+		return p.initErr
 	}
 
 	p.evalContext = evalCtx

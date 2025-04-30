@@ -148,3 +148,10 @@ func GetUserFacingMessage(err error) (string, string, bool) {
 	// Default generic message if no specific user-facing error found
 	return "An unexpected error occurred.", "Check logs for more details.", false
 }
+
+func Unwrap(err error) error {
+	if err == nil {
+		return nil
+	}
+	return errors.Unwrap(err)
+}
