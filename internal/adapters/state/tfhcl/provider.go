@@ -69,18 +69,18 @@ func (p *Provider) ensureInitialized(ctx context.Context) error {
 	filesMap, parseDiags, err := ParseHCLDirectory(ctx, p.Config.Directory, p.logger)
 	p.initDiags = append(p.initDiags, parseDiags...)
 	if err != nil {
-		p.initErr = errors.Wrap(&evaluator.HCLDiagnosticsError{Operation: "parsing", FilePath: p.Config.Directory, Diags: parseDiags}, errors.CodeStateParseError, "HCL parsing failed")
-		p.logger.Errorf(ctx, p.initErr, "Fatal HCL parsing error(s)")
-		if len(parseDiags) > 0 {
-			p.logger.Debugf(ctx, "Parsing Diagnostics:\n%s", parseDiags.Error())
+		if evaluator.DiagsHasFatalErrors(parseDiags) {
+			p.initErr = errors.Wrap(&evaluator.HCLDiagnosticsError{Operation: "parsing", FilePath: p.Config.Directory, Diags: parseDiags}, errors.CodeStateParseError, err.Error())
+		} else {
+			p.initErr = err
 		}
+		p.logger.Errorf(ctx, p.initErr, "Fatal HCL parsing error(s)")
 		return p.initErr
 	}
 	p.parsedFiles = filesMap
 	p.logger.Infof(ctx, "HCL parsing complete for %d files.", len(p.parsedFiles))
 
 	p.logger.Infof(ctx, "Building HCL evaluation context for workspace '%s'", p.Config.Workspace)
-
 	tempFilesSlice := make([]*hcl.File, 0, len(p.parsedFiles))
 	for _, f := range p.parsedFiles {
 		tempFilesSlice = append(tempFilesSlice, f)
@@ -134,7 +134,7 @@ func (p *Provider) ListResources(ctx context.Context, kind domain.ResourceKind) 
 		return nil, err
 	}
 	if len(findDiags) > 0 {
-		p.logger.Warnf(ctx, "Non-fatal diagnostics finding resource blocks for kind %s:\n%s", kind, findDiags.Error())
+		p.logger.Warnf(ctx, "Non-fatal diagnostics finding blocks for %s:\n%s", kind, findDiags.Error())
 	}
 
 	domainResources := make([]domain.StateResource, 0, len(blocks))
@@ -144,7 +144,6 @@ func (p *Provider) ListResources(ctx context.Context, kind domain.ResourceKind) 
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-
 		address := fmt.Sprintf("%s.%s", block.Labels[0], block.Labels[1])
 		blockLogger := p.logger.WithFields(map[string]any{"hcl_address": address})
 

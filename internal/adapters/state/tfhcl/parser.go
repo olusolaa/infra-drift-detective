@@ -28,6 +28,7 @@ func ParseHCLDirectory(ctx context.Context, dirPath string, logger ports.Logger)
 	}
 
 	foundHCLFiles := false
+	hasFatalParseError := false
 	logger.Debugf(ctx, "Scanning directory for HCL files")
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -48,13 +49,15 @@ func ParseHCLDirectory(ctx context.Context, dirPath string, logger ports.Logger)
 				file, diags = parser.ParseHCLFile(filePath)
 			}
 			allParsingDiags = append(allParsingDiags, diags...)
-			if file != nil {
+			if evaluator.DiagsHasFatalErrors(diags) {
+				hasFatalParseError = true
+				fileLogger.Errorf(ctx, errors.New(errors.CodeStateParseError, diags.Error()), "Fatal parsing error")
+			} else if file != nil {
 				files[filePath] = file
-			} else if diags.HasErrors() {
-				fileLogger.Warnf(ctx, "Parsing failed:\n%s", diags.Error())
 			} else {
-				fileLogger.Errorf(ctx, nil, "Internal HCL parsing error: Parser returned nil file without diagnostics")
-				allParsingDiags = allParsingDiags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Internal HCL parsing error", Detail: "Parser returned nil file without diagnostics.", Subject: &hcl.Range{Filename: filePath}})
+				fileLogger.Errorf(ctx, nil, "Internal HCL parsing error: Parser returned nil file without fatal diagnostics")
+				allParsingDiags = allParsingDiags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Internal HCL parsing error", Detail: "Parser returned nil file without fatal diagnostics.", Subject: &hcl.Range{Filename: filePath}})
+				hasFatalParseError = true
 			}
 		}
 	}
@@ -62,11 +65,11 @@ func ParseHCLDirectory(ctx context.Context, dirPath string, logger ports.Logger)
 	if !foundHCLFiles {
 		return nil, nil, errors.New(errors.CodeStateParseError, fmt.Sprintf("no HCL files (.tf, .tf.json) found in directory: %s", dirPath))
 	}
-	if evaluator.DiagsHasFatalErrors(allParsingDiags) {
+	if hasFatalParseError {
 		return files, allParsingDiags, errors.New(errors.CodeStateParseError, "fatal errors encountered during HCL parsing")
 	}
 
-	logger.Debugf(ctx, "Parsed %d HCL files.", len(files))
+	logger.Debugf(ctx, "Parsed %d HCL files successfully.", len(files))
 	return files, allParsingDiags, nil
 }
 
@@ -78,6 +81,7 @@ func FindResourceBlocks(
 	blocks = make([]*hcl.Block, 0)
 	addresses = make(map[string]string)
 	resourceSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource", LabelNames: []string{"type", "name"}}}}
+	foundAddresses := make(map[string]string)
 
 	for path, file := range hclFiles {
 		if file == nil || file.Body == nil {
@@ -99,12 +103,13 @@ func FindResourceBlocks(
 
 				if kind == requestedKind {
 					blockUniqueID := fmt.Sprintf("%s::%s", path, address)
-					if _, exists := addresses[address]; exists {
-						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource address", Detail: fmt.Sprintf("Resource %s defined multiple times (found again in %s).", address, path), Subject: &block.DefRange})
-						continue
+					if firstPath, exists := foundAddresses[address]; exists {
+						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource address", Detail: fmt.Sprintf("Resource %s defined in %s and %s.", address, firstPath, path), Subject: &block.DefRange})
+					} else {
+						blocks = append(blocks, block)
+						addresses[address] = blockUniqueID
+						foundAddresses[address] = path
 					}
-					blocks = append(blocks, block)
-					addresses[address] = blockUniqueID
 				}
 			}
 		}
@@ -114,6 +119,7 @@ func FindResourceBlocks(
 
 func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string) (*hcl.Block, hcl.Diagnostics) {
 	var foundBlock *hcl.Block
+	var firstPath string
 	var diags hcl.Diagnostics
 	resourceSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource", LabelNames: []string{"type", "name"}}}}
 
@@ -137,10 +143,11 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 				tfName := block.Labels[1]
 				if tfType == expectedType && tfName == expectedName {
 					if foundBlock != nil {
-						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource definition", Detail: fmt.Sprintf("Resource %s defined multiple times (found in %s and %s).", identifier, foundBlock.DefRange.Filename, path), Subject: &block.DefRange})
+						diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate resource definition", Detail: fmt.Sprintf("Resource %s defined multiple times (found in %s and %s).", identifier, firstPath, path), Subject: &block.DefRange})
 						return nil, diags
 					}
 					foundBlock = block
+					firstPath = path
 				}
 			}
 		}

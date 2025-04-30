@@ -119,6 +119,13 @@ func Is(err error, code Code) bool {
 	return false
 }
 
+func As(err error, target any) bool {
+	if errors.As(err, &target) {
+		return true
+	}
+	return false
+}
+
 func GetUserFacingMessage(err error) (string, string, bool) {
 	var appErr *AppError
 	if errors.As(err, &appErr) {

@@ -4,14 +4,14 @@ import (
 	"context"
 	stderrors "errors"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator"
-	"github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/olusolaa/infra-drift-detector/test/testutil"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl/evaluator"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
+	"github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +28,6 @@ func createTestDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "tfhcl-test-")
 	require.NoError(t, err, "Failed to create temp dir for testing")
-	// No automatic cleanup here, setupHCLTestProvider handles it
 	return dir
 }
 
@@ -44,13 +43,14 @@ func setupHCLTestProvider(t *testing.T, cfg tfhcl.Config) *testHCLProvider {
 	if cfg.Directory == "" {
 		cfg.Directory = createTestDir(t)
 	}
-	// Adjust var file paths ONLY if they are relative AND base dir was created here
-	if cfg.Directory != "" && !filepath.IsAbs(cfg.Directory) {
-		for i, vf := range cfg.VarFiles {
-			if vf != "" && !filepath.IsAbs(vf) {
-				// This assumes var files are created relative to the test dir *by the test*
-				cfg.VarFiles[i] = filepath.Join(cfg.Directory, filepath.Base(vf))
-			}
+
+	absDir, err := filepath.Abs(cfg.Directory)
+	require.NoError(t, err)
+	cfg.Directory = absDir
+
+	for i, vf := range cfg.VarFiles {
+		if vf != "" && !filepath.IsAbs(vf) {
+			cfg.VarFiles[i] = filepath.Join(cfg.Directory, filepath.Base(vf))
 		}
 	}
 
@@ -69,7 +69,7 @@ func TestTFHCLProvider_NewProvider(t *testing.T) {
 	mockLogger := testutil.NewMockLogger()
 	t.Run("Valid Config", func(t *testing.T) {
 		dir := t.TempDir()
-		defer os.RemoveAll(dir)
+		defer cleanupTestDir(t, dir)
 		cfg := tfhcl.Config{Directory: dir}
 		p, err := tfhcl.NewProvider(cfg, mockLogger)
 		assert.NoError(t, err)
@@ -140,20 +140,17 @@ func TestTFHCLProvider_ListResources_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, s3Resources, 1)
 	assert.Equal(t, "aws_s3_bucket.data", s3Resources[0].Metadata().SourceIdentifier)
-	// Check attribute from HCL that was evaluated (bucket name is literal here)
 	assert.Equal(t, "my-data-bucket", s3Resources[0].Attributes()["bucket"])
 }
 
 func TestTFHCLProvider_ListResources_WithVarsAndLocals(t *testing.T) {
-	// Need to create var file relative to temp dir
 	tempDir := createTestDir(t)
-	defer os.RemoveAll(tempDir)
-	varFilePath := createTestHCLFile(t, tempDir, "dev.tfvars", `instance_size = "t3.large"`)
+	defer cleanupTestDir(t, tempDir)
+	varFileName := "dev.tfvars"
+	varFilePath := createTestHCLFile(t, tempDir, varFileName, `instance_size = "t3.large"`)
 
-	// Pass absolute path or make setup handle relative path joining
 	cfg := tfhcl.Config{Directory: tempDir, VarFiles: []string{varFilePath}, Workspace: "dev"}
 	tp := setupHCLTestProvider(t, cfg)
-	// Don't call tp.cleanup() as we are using tempDir directly
 
 	createTestHCLFile(t, tp.dir, "vars.tf", `variable "instance_size" { default = "t2.small" }`)
 	createTestHCLFile(t, tp.dir, "main.tf", `
@@ -184,25 +181,32 @@ func TestTFHCLProvider_ListResources_InitErrors(t *testing.T) {
 
 	t.Run("Parse Error", func(t *testing.T) {
 		dir := createTestDir(t)
-		defer os.RemoveAll(dir)
+		defer cleanupTestDir(t, dir)
 		createTestHCLFile(t, dir, "bad.tf", `resource "a" "b" { = }`)
 		p, _ := tfhcl.NewProvider(tfhcl.Config{Directory: dir}, mockLogger)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "HCL provider initialization failed")
 		assert.Contains(t, err.Error(), "HCL parsing failed")
+		var diagErr *evaluator.HCLDiagnosticsError
+		require.True(t, errors.As(err, &diagErr))
+		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
+		assert.Contains(t, diagErr.Diags.Error(), "bad.tf")
 	})
 
 	t.Run("Context Build Error (Bad Local Ref)", func(t *testing.T) {
 		dir := createTestDir(t)
-		defer os.RemoveAll(dir)
+		defer cleanupTestDir(t, dir)
 		createTestHCLFile(t, dir, "main.tf", `locals { bad = var.nope }`)
 		p, _ := tfhcl.NewProvider(tfhcl.Config{Directory: dir}, mockLogger)
 		_, err := p.ListResources(ctx, domain.KindComputeInstance)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "HCL provider initialization failed")
-		assert.Contains(t, err.Error(), "failed to build HCL evaluation context")
-		assert.Contains(t, err.Error(), "var.nope")
+		assert.Contains(t, err.Error(), "fatal errors during HCL initialization")
+		var diagErr *evaluator.HCLDiagnosticsError
+		require.True(t, errors.As(err, &diagErr))
+		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
+		assert.Contains(t, diagErr.Diags.Error(), "var.nope")
 	})
 }
 
@@ -229,8 +233,9 @@ func TestTFHCLProvider_ListResources_EvaluationError(t *testing.T) {
 
 func TestTFHCLProvider_GetResource(t *testing.T) {
 	tempDir := createTestDir(t)
-	defer os.RemoveAll(tempDir)
-	varFilePath := createTestHCLFile(t, tempDir, "vars.tfvars", `inst_type = "m5.large"`)
+	defer cleanupTestDir(t, tempDir)
+	varFileName := "vars.tfvars"
+	varFilePath := createTestHCLFile(t, tempDir, varFileName, `inst_type = "m5.large"`)
 	cfg := tfhcl.Config{Directory: tempDir, VarFiles: []string{varFilePath}}
 	tp := setupHCLTestProvider(t, cfg)
 
@@ -260,7 +265,7 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
 		_, err := tp.provider.GetResource(ctx, domain.KindComputeInstance, "aws_instance.db")
 		require.Error(t, err)
 		var nfErr *errors.AppError
-		require.True(t, stderrors.As(err, &nfErr))
+		require.True(t, errors.As(err, &nfErr))
 		assert.Equal(t, errors.CodeResourceNotFound, nfErr.Code)
 		assert.Contains(t, err.Error(), "aws_instance.db")
 		assert.Contains(t, err.Error(), "not found")
@@ -283,16 +288,36 @@ func TestTFHCLProvider_GetResource(t *testing.T) {
             }
         `)
 
-		// Need a *new* provider instance as initialization is cached
-		// This slightly changes how setup works or requires resetting the provider state
+		// Recreate provider to force re-initialization with the new file
 		mockLogger := testutil.NewMockLogger()
-		p, _ := tfhcl.NewProvider(cfg, mockLogger) // Recreate provider with same config
+		p, _ := tfhcl.NewProvider(cfg, mockLogger)
 
 		_, err := p.GetResource(ctx, domain.KindComputeInstance, "aws_instance.error_instance")
 		require.Error(t, err)
-		var evalErr *evaluator.ResourceEvaluationError
-		require.True(t, stderrors.As(err, &evalErr), "Error should wrap ResourceEvaluationError")
 		assert.Contains(t, err.Error(), "Errors evaluating target HCL block")
-		assert.Contains(t, evalErr.Error(), "var.no_such_var")
+		var evalErr *evaluator.ResourceEvaluationError
+		require.True(t, errors.As(err, &evalErr), "Error should wrap ResourceEvaluationError")
+		assert.True(t, evaluator.DiagsHasFatalErrors(evalErr.Diags))
+		assert.Contains(t, evalErr.Diags.Error(), "var.no_such_var")
+	})
+
+	t.Run("Duplicate Resource Definition Error", func(t *testing.T) {
+		createTestHCLFile(t, tp.dir, "dup.tf", `
+			resource "aws_instance" "web" { # Duplicate address from main.tf
+				ami = "ami-dup"
+			}
+		`)
+		// Recreate provider
+		mockLogger := testutil.NewMockLogger()
+		p, _ := tfhcl.NewProvider(cfg, mockLogger)
+
+		_, err := p.GetResource(ctx, domain.KindComputeInstance, "aws_instance.web")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "Fatal error finding specific HCL block")
+		var diagErr *evaluator.HCLDiagnosticsError
+		require.True(t, errors.As(err, &diagErr))
+		assert.True(t, evaluator.DiagsHasFatalErrors(diagErr.Diags))
+		assert.Contains(t, diagErr.Diags.Error(), "Duplicate resource definition")
+
 	})
 }
