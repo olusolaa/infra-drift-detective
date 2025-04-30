@@ -70,6 +70,7 @@ and reports any detected drift based on configured attributes.`,
 
 func Execute(ctx context.Context) {
 	err := rootCmd.ExecuteContext(ctx)
+	// could this be error that is recoverable?
 	if err != nil {
 		os.Exit(1)
 	}

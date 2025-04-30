@@ -30,7 +30,17 @@ type Application struct {
 	Config *config.Config
 }
 
+// this is doing a lot seperate this into smaller functions like
+// - initialize config
+// - initialize logger
+// - initialize state provider
+// - initialize platform provider
+// - initialize matcher
+// - initialize reporter
+// - initialize engine
+// alternatively you can use veradic function arguments
 func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Application, error) {
+	//accept logger as argument
 	cfg := config.DefaultConfig()
 	err := v.Unmarshal(cfg)
 	if err != nil {
@@ -40,6 +50,7 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 	logCfg := log.Config{Level: cfg.Settings.LogLevel, Format: cfg.Settings.LogFormat}
 	logger, err := log.NewLogger(logCfg)
 	if err != nil {
+		// user logger instead of FPrintf
 		fmt.Fprintf(os.Stderr, "FATAL: Failed to initialize logger: %v\n", err)
 		return nil, errors.Wrap(err, errors.CodeInternal, "logger initialization failed")
 	}
@@ -62,6 +73,8 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 			for kind, attrs := range overrideMap {
 				if index, exists := existingResources[kind]; exists {
 					logger.Debugf(ctx, "Overriding attributes for kind '%s' with: %v", kind, attrs)
+					// config should provide a method to override attributes
+					// config should be read only
 					cfg.Resources[index].Attributes = attrs
 				} else {
 					logger.Warnf(ctx, "Ignoring attribute override for undefined kind '%s'", kind)
@@ -144,6 +157,7 @@ func BuildApplicationFromViper(ctx context.Context, v *viper.Viper) (*Applicatio
 	case text.ReporterTypeText:
 		reportLog := logger.WithFields(map[string]any{"component": "reporter", "type": text.ReporterTypeText})
 		if cfg.Settings.Reporter.Text == nil {
+			// config should be loaded only once
 			cfg.Settings.Reporter.Text = config.DefaultConfig().Settings.Reporter.Text
 		}
 		reporter, err = text.NewReporter(*cfg.Settings.Reporter.Text, reportLog)
@@ -184,6 +198,7 @@ func parseAttributesOverride(override string) map[domain.ResourceKind][]string {
 	for _, pair := range pairs {
 		parts := strings.SplitN(pair, "=", 2)
 		if len(parts) != 2 {
+			// accept logger as argument
 			fmt.Fprintf(os.Stderr, "Warning: Skipping invalid attribute override format: %s\n", pair)
 			continue
 		}

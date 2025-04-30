@@ -54,6 +54,9 @@ func NewDriftAnalysisEngine(
 	}, nil
 }
 
+//consider breaking the run into multiple functions
+// add comment to help explain the flow
+
 func (e *DriftAnalysisEngine) Run(ctx context.Context) error {
 	e.logger.Infof(ctx, "Starting drift analysis run using %s state and %s platform providers",
 		e.stateProvider.Type(), e.platformProvider.Type())
@@ -251,6 +254,7 @@ func (e *DriftAnalysisEngine) collectResources(ctx context.Context,
 
 	wg.Add(2)
 	go func() {
+		// can this be it own function
 		defer wg.Done()
 		for {
 			select {
@@ -266,6 +270,7 @@ func (e *DriftAnalysisEngine) collectResources(ctx context.Context,
 	}()
 
 	go func() {
+		// can this be it own function
 		defer wg.Done()
 		for {
 			select {
@@ -324,6 +329,7 @@ func (e *DriftAnalysisEngine) processUnmatched(ctx context.Context, matchResult 
 	}
 }
 
+// can this be broken into multiple functions
 func (e *DriftAnalysisEngine) compareWorker(ctx context.Context,
 	inputChan <-chan ports.MatchedPair,
 	resultChan chan<- domain.ComparisonResult,
