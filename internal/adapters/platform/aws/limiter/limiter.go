@@ -1,7 +1,8 @@
-package util
+package limiter
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
@@ -17,26 +18,34 @@ const (
 var (
 	apiLimiter  *rate.Limiter
 	limiterOnce sync.Once
+	rpsUsed     int = defaultRateLimitRPS
 )
 
-func InitializeLimiter(rps int, logger ports.Logger) {
+func Initialize(rps int, logger ports.Logger) {
 	limiterOnce.Do(func() {
 		limitValue := defaultRateLimitRPS
+		logMsg := "Initializing global AWS API rate limiter"
 		if rps >= minRateLimitRPS && rps <= maxRateLimitRPS {
 			limitValue = rps
+			logMsg = fmt.Sprintf("%s with configured rate", logMsg)
 		} else if rps != 0 {
 			logger.Warnf(nil, "Invalid AWS API RPS configured (%d), using default %d RPS. Valid range: %d-%d.", rps, defaultRateLimitRPS, minRateLimitRPS, maxRateLimitRPS)
+			logMsg = fmt.Sprintf("%s with default rate (invalid config)", logMsg)
+		} else {
+			logMsg = fmt.Sprintf("%s with default rate", logMsg)
 		}
+
 		limit := rate.Limit(limitValue)
 		apiLimiter = rate.NewLimiter(limit, limitValue)
-		logger.Infof(nil, "Initialized global AWS API rate limiter: %d RPS", limitValue)
+		rpsUsed = limitValue
+		logger.Infof(nil, "%s: %d RPS", logMsg, limitValue)
 	})
 }
 
 func Wait(ctx context.Context, logger ports.Logger) error {
 	if apiLimiter == nil {
-		logger.Errorf(ctx, nil, "AWS API rate limiter accessed before initialization, initializing with default")
-		InitializeLimiter(defaultRateLimitRPS, logger)
+		logger.Errorf(ctx, nil, "FATAL: AWS API rate limiter accessed before initialization.")
+		Initialize(defaultRateLimitRPS, logger)
 	}
 	err := apiLimiter.Wait(ctx)
 	if err != nil {

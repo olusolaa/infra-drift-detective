@@ -3,7 +3,6 @@ package aws
 import (
 	"context"
 	"fmt"
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/util"
 	"net"
 	"net/http"
 	"time"
@@ -11,6 +10,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/ec2"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/limiter"
+	awstypes "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/types"
 	"github.com/olusolaa/infra-drift-detector/internal/config"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
@@ -33,18 +34,14 @@ type Provider struct {
 	logger    ports.Logger
 }
 
-func (p *Provider) Type() string {
-	return util.ProviderTypeAWS
-}
-
 func NewProvider(ctx context.Context, appCfg *config.Config, logger ports.Logger) (*Provider, error) {
 	if logger == nil {
-		return nil, errors.New(errors.CodeConfigValidation, "logger cannot be nil")
+		return nil, errors.New(errors.CodeConfigValidation, "logger cannot be nil for AWS Provider")
 	}
 
 	awsPlatformCfg := appCfg.Platform.AWS
 	if awsPlatformCfg == nil {
-		awsPlatformCfg = &config.AWSPlatformConfig{}
+		awsPlatformCfg = config.DefaultConfig().Platform.AWS
 	}
 	if awsPlatformCfg.APIRequestsPerSecond == 0 {
 		awsPlatformCfg.APIRequestsPerSecond = defaultRateLimitRPS
@@ -62,7 +59,7 @@ func NewProvider(ctx context.Context, appCfg *config.Config, logger ports.Logger
 		logger.Debugf(ctx, "Using specified AWS profile", "profile", awsPlatformCfg.Profile)
 	}
 
-	util.InitializeLimiter(awsPlatformCfg.APIRequestsPerSecond, logger) // Initialize global limiter
+	limiter.Initialize(awsPlatformCfg.APIRequestsPerSecond, logger) // Initialize global limiter
 
 	httpClient := &http.Client{
 		Timeout: defaultHTTPTimeout,
@@ -108,25 +105,14 @@ func NewProvider(ctx context.Context, appCfg *config.Config, logger ports.Logger
 	return p, nil
 }
 
-func NewProviderWithHandlers(cfg aws.Config, logger ports.Logger, handlers ...AWSResourceHandler) *Provider {
-	p := &Provider{
-		awsConfig: cfg,
-		handlers:  make(map[domain.ResourceKind]AWSResourceHandler),
-		logger:    logger,
-	}
-
-	for _, handler := range handlers {
-		p.registerHandler(handler)
-	}
-
-	return p
-}
-
-// registerHandler remains the same
 func (p *Provider) registerHandler(handler AWSResourceHandler) {
 	if handler != nil {
 		p.handlers[handler.Kind()] = handler
 	}
+}
+
+func (p *Provider) Type() string {
+	return awstypes.ProviderTypeAWS
 }
 
 func (p *Provider) ListResources(
@@ -155,7 +141,6 @@ func (p *Provider) ListResources(
 				handlerLogger.Errorf(childCtx, err, "Handler failed")
 				return err
 			}
-			handlerLogger.Debugf(childCtx, "Finished ListResources for handler")
 			return nil
 		})
 	}

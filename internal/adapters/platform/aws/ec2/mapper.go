@@ -3,38 +3,34 @@ package ec2
 import (
 	"context"
 	"encoding/base64"
-	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/util"
+	awstypes "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/types"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	aws_limiter "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/limiter"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 )
 
-// ec2InstanceResource implements domain.PlatformResource with lazy loading for attributes.
 type ec2InstanceResource struct {
-	mu           sync.RWMutex // Protects lazy-loaded fields and cache
-	meta         domain.ResourceMetadata
-	baseInstance types.Instance
-	awsConfig    aws.Config   // Store config to create clients on demand
-	parentLogger ports.Logger // Logger passed down from handler
-
+	mu              sync.RWMutex
+	meta            domain.ResourceMetadata
+	baseInstance    types.Instance
+	awsConfig       aws.Config
+	parentLogger    ports.Logger
 	userData        *string
 	userDataErr     error
-	userDataFetched bool // Use simple bool instead of sync.Once for finer lock control
-
-	volumes        map[string]types.Volume
-	volumesErr     error
-	volumesFetched bool // Use simple bool
-
+	userDataFetched bool
+	volumes         map[string]types.Volume
+	volumesErr      error
+	volumesFetched  bool
 	attributesCache map[string]any
 	attributesBuilt bool
 }
 
-// newEc2InstanceResource creates the resource object, storing necessary info for lazy loading.
 func newEc2InstanceResource(
 	instance types.Instance,
 	cfg aws.Config,
@@ -46,10 +42,9 @@ func newEc2InstanceResource(
 	if instanceID == "" {
 		return nil, errors.New(errors.CodeInternal, "cannot create resource for instance with nil or empty InstanceId")
 	}
-
 	meta := domain.ResourceMetadata{
 		Kind:               domain.KindComputeInstance,
-		ProviderType:       util.ProviderTypeAWS,
+		ProviderType:       awstypes.ProviderTypeAWS,
 		ProviderAssignedID: instanceID,
 		SourceIdentifier:   instanceID,
 		Region:             region,
@@ -59,19 +54,16 @@ func newEc2InstanceResource(
 		meta:         meta,
 		baseInstance: instance,
 		awsConfig:    cfg,
-		parentLogger: logger.WithFields(map[string]any{"instance_id": instanceID}), // Pre-add context
+		parentLogger: logger.WithFields(map[string]any{"instance_id": instanceID}),
 	}, nil
 }
 
 func (r *ec2InstanceResource) Metadata() domain.ResourceMetadata {
-	// Metadata is derived from base instance, safe to return directly
 	return r.meta
 }
 
-// Attributes retrieves the full attribute map, triggering lazy loading if needed.
 func (r *ec2InstanceResource) Attributes() map[string]any {
 	r.mu.RLock()
-	// Return cached map if already built
 	if r.attributesBuilt {
 		cacheCopy := make(map[string]any, len(r.attributesCache))
 		for k, v := range r.attributesCache {
@@ -82,11 +74,9 @@ func (r *ec2InstanceResource) Attributes() map[string]any {
 	}
 	r.mu.RUnlock()
 
-	// Acquire write lock to build the map
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double check if another goroutine built it while waiting
 	if r.attributesBuilt {
 		cacheCopy := make(map[string]any, len(r.attributesCache))
 		for k, v := range r.attributesCache {
@@ -95,11 +85,8 @@ func (r *ec2InstanceResource) Attributes() map[string]any {
 		return cacheCopy
 	}
 
-	r.parentLogger.Debugf(nil, "Building full attribute map (lazy loading if needed)") // Use nil context if none available
-
-	// --- Build initial map from base instance data ---
+	r.parentLogger.Debugf(nil, "Building full attribute map (lazy loading if needed)")
 	attrs := make(map[string]any)
-	// Pass logger down to mapping helpers
 	mapBaseInstanceAttributes(&r.baseInstance, r.meta.Region, r.meta.AccountID, attrs, r.parentLogger)
 
 	// --- Trigger Lazy Loading ---
@@ -108,33 +95,23 @@ func (r *ec2InstanceResource) Attributes() map[string]any {
 	// For this exercise, let's use context.Background(), but acknowledge the limitation.
 	ctx := context.Background()
 
-	// User Data
-	userDataValue, userDataErr := r.getUserData(ctx) // Use getter method
+	userDataValue, userDataErr := r.getUserData(ctx)
 	if userDataErr == nil && userDataValue != nil {
 		attrs[domain.ComputeUserDataKey] = *userDataValue
 	} else if userDataErr != nil {
 		r.parentLogger.Warnf(ctx, "Failed to lazy-load user data: %v", userDataErr)
-		// Optionally add an error marker attribute
-		// attrs["_error_user_data"] = userDataErr.Error()
 	}
 
-	// Volumes
-	volumeDetails, volumesErr := r.getVolumes(ctx) // Use getter method
+	volumeDetails, volumesErr := r.getVolumes(ctx)
 	if volumesErr == nil && len(volumeDetails) > 0 {
-		// Map block devices using volume details
 		r.mapBlockDevicesUsingVolumes(attrs, volumeDetails)
 	} else if volumesErr != nil {
 		r.parentLogger.Warnf(ctx, "Failed to lazy-load volume details: %v. Falling back to mapping from instance data.", volumesErr)
-		// Fallback to mapping only from baseInstance data
 		r.mapBlockDevicesFromInstanceOnly(attrs)
-		// Optionally add an error marker attribute
-		// attrs["_error_volumes"] = volumesErr.Error()
 	} else {
-		// No volumes attached or fetched successfully, map from baseInstance mapping only
 		r.mapBlockDevicesFromInstanceOnly(attrs)
 	}
 
-	// --- Cache and return ---
 	r.attributesCache = attrs
 	r.attributesBuilt = true
 	r.parentLogger.Debugf(ctx, "Attribute map built successfully")
@@ -146,26 +123,23 @@ func (r *ec2InstanceResource) Attributes() map[string]any {
 	return finalMap
 }
 
-// getUserData fetches UserData via API call, uses simple bool flag for fetch control under lock.
 func (r *ec2InstanceResource) getUserData(ctx context.Context) (*string, error) {
 	r.mu.RLock()
 	if r.userDataFetched {
-		err := r.userDataErr // Read potentially cached error
+		err := r.userDataErr
+		userData := r.userData
 		r.mu.RUnlock()
-		return r.userData, err // Return cached data/error
+		return userData, err
 	}
 	r.mu.RUnlock()
 
-	// Acquire write lock to perform fetch
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double check if fetched by another goroutine while waiting
 	if r.userDataFetched {
 		return r.userData, r.userDataErr
 	}
 
-	// Perform the fetch
 	client := ec2.NewFromConfig(r.awsConfig)
 	logger := r.parentLogger.WithFields(map[string]any{"lazy_fetch": "userdata"})
 	logger.Debugf(ctx, "Lazy fetching UserData API call")
@@ -175,14 +149,14 @@ func (r *ec2InstanceResource) getUserData(ctx context.Context) (*string, error) 
 		InstanceId: &r.meta.ProviderAssignedID,
 	}
 
-	if err := util.Wait(ctx, logger); err != nil {
+	if err := aws_limiter.Wait(ctx, logger); err != nil {
 		r.userDataErr = err
-		r.userDataFetched = true // Mark as fetched even on limiter error
+		r.userDataFetched = true
 		return nil, err
 	}
 
 	result, err := client.DescribeInstanceAttribute(ctx, input)
-	r.userDataFetched = true // Mark as fetched regardless of API outcome
+	r.userDataFetched = true
 
 	if err != nil {
 		r.userDataErr = err
@@ -192,7 +166,7 @@ func (r *ec2InstanceResource) getUserData(ctx context.Context) (*string, error) 
 	if result.UserData != nil && result.UserData.Value != nil && *result.UserData.Value != "" {
 		decodedBytes, decodeErr := base64.StdEncoding.DecodeString(*result.UserData.Value)
 		if decodeErr != nil {
-			r.userDataErr = errors.Wrap(decodeErr, errors.CodeInternal, "failed to decode UserData") // Wrap decode error
+			r.userDataErr = errors.Wrap(decodeErr, errors.CodeInternal, "failed to decode UserData")
 			logger.Warnf(ctx, "Failed to decode UserData: %v", decodeErr)
 			return nil, r.userDataErr
 		}
@@ -203,7 +177,7 @@ func (r *ec2InstanceResource) getUserData(ctx context.Context) (*string, error) 
 		logger.Debugf(ctx, "No UserData attribute found")
 	}
 
-	r.userDataErr = nil // Explicitly nil error on success or no data found
+	r.userDataErr = nil
 	return r.userData, nil
 }
 
@@ -211,21 +185,19 @@ func (r *ec2InstanceResource) getVolumes(ctx context.Context) (map[string]types.
 	r.mu.RLock()
 	if r.volumesFetched {
 		err := r.volumesErr
+		volumes := r.volumes
 		r.mu.RUnlock()
-		return r.volumes, err
+		return volumes, err
 	}
 	r.mu.RUnlock()
 
-	// Acquire write lock
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double check
 	if r.volumesFetched {
 		return r.volumes, r.volumesErr
 	}
 
-	// Perform the fetch
 	client := ec2.NewFromConfig(r.awsConfig)
 	logger := r.parentLogger.WithFields(map[string]any{"lazy_fetch": "volumes"})
 	logger.Debugf(ctx, "Lazy fetching EBS Volume details")
@@ -233,7 +205,7 @@ func (r *ec2InstanceResource) getVolumes(ctx context.Context) (map[string]types.
 	volumeIDs := extractEBSVolumeIDs(&r.baseInstance)
 	if len(volumeIDs) == 0 {
 		logger.Debugf(ctx, "No EBS volumes found in instance block device mappings, skipping DescribeVolumes")
-		r.volumes = make(map[string]types.Volume) // Empty map, no error
+		r.volumes = make(map[string]types.Volume)
 		r.volumesFetched = true
 		r.volumesErr = nil
 		return r.volumes, nil
@@ -242,16 +214,14 @@ func (r *ec2InstanceResource) getVolumes(ctx context.Context) (map[string]types.
 	input := &ec2.DescribeVolumesInput{VolumeIds: volumeIDs}
 	logger.Debugf(ctx, "Calling DescribeVolumes for %d volumes", len(volumeIDs))
 
-	if err := util.Wait(ctx, logger); err != nil {
+	if err := aws_limiter.Wait(ctx, logger); err != nil {
 		r.volumesErr = err
 		r.volumesFetched = true
 		return nil, err
 	}
 
-	// DescribeVolumes generally doesn't need pagination when filtering by IDs,
-	// but robust code might handle it anyway if large numbers of IDs were possible.
 	output, err := client.DescribeVolumes(ctx, input)
-	r.volumesFetched = true // Mark as fetched
+	r.volumesFetched = true
 
 	if err != nil {
 		r.volumesErr = err
@@ -352,14 +322,14 @@ func (r *ec2InstanceResource) mapBlockDevicesFromInstanceOnly(attrs map[string]a
 func mapSingleBlockDevice(bdm types.InstanceBlockDeviceMapping, volumes map[string]types.Volume, isRoot bool, logger ports.Logger) map[string]any {
 	if bdm.Ebs == nil {
 		return nil
-	} // Can only map EBS currently
+	}
 	volID := aws.ToString(bdm.Ebs.VolumeId)
 	devName := aws.ToString(bdm.DeviceName)
 	norm := make(map[string]any)
 	norm["device_name"] = devName
 	norm["delete_on_termination"] = aws.ToBool(bdm.Ebs.DeleteOnTermination)
 
-	if volumes != nil { // Check if volume details were successfully fetched
+	if volumes != nil {
 		if vol, ok := volumes[volID]; ok {
 			norm["volume_type"] = string(vol.VolumeType)
 			norm["volume_size"] = aws.ToInt32(vol.Size)
@@ -369,16 +339,14 @@ func mapSingleBlockDevice(bdm types.InstanceBlockDeviceMapping, volumes map[stri
 			norm["kms_key_id"] = aws.ToString(vol.KmsKeyId)
 			norm["snapshot_id"] = aws.ToString(vol.SnapshotId)
 		} else {
-			logger.Warnf(nil, "Volume %s (Device: %s) not found in DescribeVolumes results, using potentially inaccurate mapping data", volID, devName)
-			// Fallback if volume map provided but ID missing (should be rare)
-			norm["encrypted"] = false // Safer default?
+			logger.Warnf(nil, "Volume %s (Device: %s) not found in DescribeVolumes results, using less accurate mapping data", volID, devName)
+			norm["encrypted"] = false
 		}
 	} else {
-		// Fallback if volume map is nil (e.g., from ListResources path or DescribeVolumes error)
 		logger.Debugf(nil, "No volume details available for device %s (Volume: %s), using basic mapping data", devName, volID)
-		norm["encrypted"] = false // Cannot determine encryption without DescribeVolumes
+		norm["encrypted"] = false
 	}
-	// Apply defaults AFTER potential data population
+
 	if _, exists := norm["delete_on_termination"]; !exists {
 		norm["delete_on_termination"] = isRoot
 	}
