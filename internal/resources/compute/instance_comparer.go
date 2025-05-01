@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 )
@@ -18,7 +17,10 @@ type InstanceComparer struct{}
 func NewInstanceComparer() *InstanceComparer {
 	return &InstanceComparer{}
 }
-func (c *InstanceComparer) Kind() domain.ResourceKind { return domain.KindComputeInstance }
+
+func (c *InstanceComparer) Kind() domain.ResourceKind {
+	return domain.KindComputeInstance
+}
 
 func (c *InstanceComparer) Compare(
 	ctx context.Context,
@@ -26,8 +28,10 @@ func (c *InstanceComparer) Compare(
 	actual domain.PlatformResource,
 	attributesToCheck []string,
 ) ([]domain.AttributeDiff, error) {
+
 	if desired == nil || actual == nil {
-		return nil, errors.New(errors.CodeInternal, "compare called with nil desired or actual resource")
+		err := errors.New(errors.CodeInternal, "compare called with nil desired or actual resource")
+		return nil, err
 	}
 
 	desiredAttrs := desired.Attributes()
@@ -53,28 +57,32 @@ func (c *InstanceComparer) Compare(
 
 		if !isEqual {
 			details := ""
+			var detailErr error
+			isEqualRetry := true
+
 			if attrKey == domain.KeyTags {
 				details = c.generateTagDiffDetails(desiredVal, actualVal)
-			} else if attrKey == domain.ComputeRootBlockDeviceKey || attrKey == domain.ComputeEBSBlockDevicesKey {
-
-				var detailErr error
-				if attrKey == domain.ComputeRootBlockDeviceKey {
-					_, details, detailErr = c.generateDetailedBlockDeviceDiff(desiredVal, actualVal, true)
-				} else {
-					_, details, detailErr = c.generateDetailedBlockDeviceSliceDiff(desiredVal, actualVal)
-				}
-				if detailErr != nil {
-					details = fmt.Sprintf("Error generating diff details: %v", detailErr)
-				}
-
+			} else if attrKey == domain.ComputeRootBlockDeviceKey {
+				isEqualRetry, details, detailErr = c.generateDetailedBlockDeviceDiff(desiredVal, actualVal, true)
+			} else if attrKey == domain.ComputeEBSBlockDevicesKey {
+				isEqualRetry, details, detailErr = c.generateDetailedBlockDeviceSliceDiff(desiredVal, actualVal)
+			} else {
+				isEqualRetry = false
 			}
 
-			diffs = append(diffs, domain.AttributeDiff{
-				AttributeName: attrKey,
-				ExpectedValue: desiredVal,
-				ActualValue:   actualVal,
-				Details:       details,
-			})
+			if detailErr != nil {
+				details = fmt.Sprintf("Error generating diff details: %v", detailErr)
+				isEqualRetry = false
+			}
+
+			if !isEqualRetry || !isEqual {
+				diffs = append(diffs, domain.AttributeDiff{
+					AttributeName: attrKey,
+					ExpectedValue: desiredVal,
+					ActualValue:   actualVal,
+					Details:       details,
+				})
+			}
 		}
 	}
 
@@ -111,16 +119,15 @@ func (c *InstanceComparer) robustCompare(expected, actual any, expectedExists, a
 		return false, nil
 	}
 
-	if !expVal.Type().Comparable() && !actVal.Type().Comparable() {
-		if expVal.Kind() == reflect.Map && actVal.Kind() == reflect.Map {
+	if (!expVal.Type().Comparable() || !actVal.Type().Comparable()) && expVal.Kind() == actVal.Kind() {
+		switch expVal.Kind() {
+		case reflect.Map:
 			return c.compareMapsRecursive(expVal, actVal)
-		}
-		if expVal.Kind() == reflect.Slice && actVal.Kind() == reflect.Slice {
+		case reflect.Slice:
 			return c.compareSlicesRecursive(expected, actual)
+		default:
+			return false, fmt.Errorf("cannot compare non-comparable types %s and %s", expVal.Type(), actVal.Type())
 		}
-
-		return reflect.DeepEqual(expVal.Interface(), actVal.Interface()), nil
-		//return false, fmt.Errorf("cannot compare non-comparable types %s and %s", expVal.Type(), actVal.Type())
 	}
 
 	if expVal.Kind() == reflect.Bool || actVal.Kind() == reflect.Bool {
@@ -155,10 +162,8 @@ func (c *InstanceComparer) robustCompare(expected, actual any, expectedExists, a
 		return expVal.Interface() == actVal.Interface(), nil
 	}
 
-	return cmp.Equal(expVal.Interface(), actVal.Interface()), nil
+	return false, nil
 }
-
-// --- Reflection Helpers (inspired by shared code) ---
 
 func (c *InstanceComparer) derefValue(v reflect.Value) reflect.Value {
 	for (v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface) && !v.IsNil() {
@@ -261,7 +266,6 @@ func (c *InstanceComparer) compareMapsRecursive(expMapVal, actMapVal reflect.Val
 		if !exists {
 			return false, nil
 		}
-
 		equal, err := c.robustCompare(expV.Interface(), actV.Interface(), true, true)
 		if err != nil {
 			return false, fmt.Errorf("error comparing map key '%s': %w", key, err)
@@ -305,13 +309,12 @@ func (c *InstanceComparer) compareSlicesRecursive(expected, actual any) (bool, e
 	return true, nil
 }
 
-// compareSliceOfMapsUnordered compares slices of maps using a key field, ignoring order.
 func (c *InstanceComparer) compareSliceOfMapsUnordered(expected, actual any, keyField string) (bool, error) {
 	expSliceVal := reflect.ValueOf(expected)
 	actSliceVal := reflect.ValueOf(actual)
 
-	if expSliceVal.Kind() != reflect.Slice || actSliceVal.Kind() != reflect.Slice { /* ... error ... */
-		return false, fmt.Errorf("...")
+	if expSliceVal.Kind() != reflect.Slice || actSliceVal.Kind() != reflect.Slice {
+		return false, fmt.Errorf("invalid input: expected slices")
 	}
 	if expSliceVal.IsNil() && actSliceVal.IsNil() {
 		return true, nil
@@ -364,8 +367,7 @@ func (c *InstanceComparer) compareSliceOfMapsUnordered(expected, actual any, key
 
 		equal, err := c.robustCompare(expSliceVal.Index(i).Interface(), actItemVal.Interface(), true, true)
 		if err != nil {
-			return false,
-				fmt.Errorf("error comparing items with key '%s': %w", keyStr, err)
+			return false, fmt.Errorf("error comparing items with key '%s': %w", keyStr, err)
 		}
 		if !equal {
 			return false, nil
@@ -403,7 +405,11 @@ func (c *InstanceComparer) generateTagDiffDetails(desired, actual any) string {
 		}
 	}
 
-	return c.generateDetailedMapDiffGeneric(filteredDesired, filteredActual) + " (Ignoring aws:* tags)"
+	diff := c.generateDetailedMapDiffGeneric(filteredDesired, filteredActual)
+	if diff != "" {
+		return diff + " (Ignoring aws:* tags)"
+	}
+	return ""
 }
 
 func (c *InstanceComparer) generateDetailedBlockDeviceDiff(desiredVal, actualVal any, isRoot bool) (bool, string, error) {
@@ -464,15 +470,15 @@ func (c *InstanceComparer) generateDetailedBlockDeviceSliceDiff(desiredVal, actu
 	}
 
 	subDiffs := make(map[string]string)
-
 	for devName, normDesired := range normDesiredMap {
 		normActual, exists := normActualMap[devName]
 		if !exists {
 			subDiffs[devName] = "<missing in actual>"
 			continue
 		}
-		if !cmp.Equal(normDesired, normActual) {
-			subDiffs[devName] = c.generateDetailedMapDiffGeneric(normDesired, normActual)
+		mapDiffDetails := c.generateDetailedMapDiffGeneric(normDesired, normActual)
+		if mapDiffDetails != "" {
+			subDiffs[devName] = mapDiffDetails
 		}
 	}
 	for devName := range normActualMap {
@@ -485,7 +491,6 @@ func (c *InstanceComparer) generateDetailedBlockDeviceSliceDiff(desiredVal, actu
 		return true, "", nil
 	}
 
-	// Format details
 	var details strings.Builder
 	details.WriteString("Differences by device name: ")
 	devNames := make([]string, 0, len(subDiffs))
@@ -578,9 +583,29 @@ func (c *InstanceComparer) normalizeBlockDevice(input any, isRoot bool) map[stri
 	}
 	return norm
 }
+
 func copyIfPresentNorm(src, dest map[string]any, srcKey, destKey string) {
 	if val, ok := src[srcKey]; ok {
 		dest[destKey] = val
 	}
 }
-func normalizeIntField(m map[string]any, key string) { /* ... as before ... */ }
+
+func normalizeIntField(m map[string]any, key string) {
+	if val, ok := m[key]; ok {
+		switch v := val.(type) {
+		case float64:
+			m[key] = int(v)
+		case float32:
+			m[key] = int(v)
+		case int:
+		case int32:
+			m[key] = int(v)
+		case int64:
+			m[key] = int(v)
+		case string:
+			if i, err := strconv.Atoi(v); err == nil {
+				m[key] = i
+			}
+		}
+	}
+}

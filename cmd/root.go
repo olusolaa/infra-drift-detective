@@ -32,7 +32,7 @@ and reports any detected drift based on configured attributes.`,
 		return initializeConfig(cmd)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		application, bootstrapErr := app.BuildApplicationFromViper(cmd.Context(), viper.GetViper())
+		application, bootstrapErr := app.BuildApplication(cmd.Context(), viper.GetViper())
 		if bootstrapErr != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: Application initialization failed: %v\n", bootstrapErr)
 			if appErr := (*apperrors.AppError)(nil); errors.As(bootstrapErr, &appErr) {
