@@ -1,0 +1,72 @@
+# General application settings
+settings:
+  log_level: info # debug, info, warn, error
+  log_format: text # text, json
+  concurrency: 10 # Max concurrent comparisons
+  matcher: tag # Currently supported: tag
+  reporter: text # Currently supported: text
+  matcher_config:
+    tag:
+      key: TFResourceAddress # The tag key containing the TF address (e.g., aws_instance.my_app)
+  reporter_config:
+    text:
+      no_color: false # Set to true to disable colored output
+
+# Desired state provider configuration (Choose ONE)
+state:
+  # Option 1: Terraform State File
+  provider_type: tfstate
+  tfstate:
+    path: "../examples/terraform.tfstate" # Relative path from execution location example
+
+  # Option 2: Terraform HCL Files (Limited - only literal values)
+  # provider_type: tfhcl
+  # tfhcl:
+  #  directory: "../examples"
+
+# Actual platform provider configuration (Choose ONE)
+platform:
+  # Option 1: AWS (uses default SDK credential chain)
+  # No specific config needed if using default credentials/region from env/profile
+  aws: {}
+  # Option 2: GCP (Future)
+  # gcp:
+  #   project_id: "my-gcp-project"
+  #   credentials_file: "/path/to/key.json"
+
+# Resource kinds to analyze and their specific configurations
+resources:
+  - kind: ComputeInstance # Must match domain.KindComputeInstance value
+    # Optional filters for listing actual resources from the platform (AWS EC2 in this case)
+    # Keys should match domain keys (e.g., domain.KeyName -> "tag:Name") or tag prefixes
+    platform_filters:
+      "tag:Environment": "production"
+      # "instance-state-name": "running" # Example EC2 specific filter (already defaulted)
+    # Attributes to compare for drift for this specific kind
+    attributes:
+      - instance_type
+      - image_id
+      - tags # Compare the tags map (excluding aws: prefixed tags)
+      - security_groups # Compare the list of security group IDs
+      - iam_instance_profile
+      - root_block_device # Compare the root block device config
+      - ebs_block_devices # Compare the attached EBS volumes config
+      # - user_data # Compare user data (careful with encoding/secrets)
+      # - availability_zone
+      # - subnet_id
+
+  - kind: StorageBucket # Example for S3 (requires S3 handler/comparer implementation)
+    # platform_filters:
+    #   "tag:Project": "Infra"
+    attributes:
+      - tags
+      - acl
+      - versioning_enabled
+      - lifecycle_rules
+      # - logging
+      # - website
+      # - server_side_encryption_configuration
+      # - policy
+      # - region # Often part of metadata, but can be compared if needed
+
+# Add other resource kinds as needed
