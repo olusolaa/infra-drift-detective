@@ -14,11 +14,9 @@ import (
 )
 
 var (
-	cfgFile   string
-	logLevel  string
-	logFormat string
-	// Bonus point: CLI flag to specify attributes per kind
-	// Format: kind1=attr1,attr2;kind2=attrA,attrB
+	cfgFile            string
+	logLevel           string
+	logFormat          string
 	attributesOverride string
 )
 
@@ -32,7 +30,8 @@ and reports any detected drift based on configured attributes.`,
 		return initializeConfig(cmd)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		application, bootstrapErr := app.BuildApplication(cmd.Context(), viper.GetViper())
+
+		result, bootstrapErr := bootstrap(cmd.Context(), viper.GetViper())
 		if bootstrapErr != nil {
 			fmt.Fprintf(os.Stderr, "ERROR: Application initialization failed: %v\n", bootstrapErr)
 			if appErr := (*apperrors.AppError)(nil); errors.As(bootstrapErr, &appErr) {
@@ -46,15 +45,11 @@ and reports any detected drift based on configured attributes.`,
 			return bootstrapErr
 		}
 
-		appLogger := application.Logger
-		appCtx := cmd.Context()
+		application := app.NewApplication(result.Engine, result.Logger)
 
-		appLogger.Infof(appCtx, "Starting analysis engine run...")
-		runErr := application.Engine.Run(appCtx)
+		runErr := application.Run(cmd.Context())
 
 		if runErr != nil {
-			appLogger.Errorf(appCtx, runErr, "Application execution failed")
-
 			userMsg, suggestion, _ := apperrors.GetUserFacingMessage(runErr)
 			fmt.Fprintf(os.Stderr, "ERROR: %s\n", userMsg)
 			if suggestion != "" {
@@ -63,7 +58,6 @@ and reports any detected drift based on configured attributes.`,
 			return runErr
 		}
 
-		appLogger.Infof(appCtx, "Application finished successfully.")
 		return nil
 	},
 }
