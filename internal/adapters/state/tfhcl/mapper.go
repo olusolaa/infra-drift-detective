@@ -1,5 +1,3 @@
-// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/mapper.go ---
-
 package tfhcl
 
 import (
@@ -42,15 +40,21 @@ func MapEvaluatedHCLToDomain(
 		return nil, apperrors.Wrap(err, apperrors.CodeMappingError, fmt.Sprintf("failed normalizing evaluated HCL attributes for %s", address))
 	}
 
+	tfResourceType := ""
+	parts := strings.SplitN(address, ".", 2)
+	if len(parts) == 2 {
+		tfResourceType = parts[0]
+	}
+
 	providerType := ""
-	parts := strings.SplitN(address, "_", 2)
-	if len(parts) > 0 {
-		providerType = parts[0]
+	providerParts := strings.SplitN(tfResourceType, "_", 2)
+	if len(providerParts) > 0 {
+		providerType = providerParts[0]
 	}
 
 	meta := domain.ResourceMetadata{
 		Kind:             kind,
-		ProviderType:     providerType,
+		ProviderType:     providerType, // Use extracted provider type
 		SourceIdentifier: address,
 	}
 

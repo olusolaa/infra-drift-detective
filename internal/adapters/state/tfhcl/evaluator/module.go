@@ -1,3 +1,5 @@
+// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/module.go ---
+
 package evaluator
 
 import (
@@ -7,6 +9,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/hashicorp/hcl/v2/hclsyntax" // Use syntax types more
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	apperrors "github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/zclconf/go-cty/cty"
@@ -17,8 +20,8 @@ type Module struct {
 	path        string
 	workspace   string
 	inputVars   map[string]cty.Value
-	variables   map[string]*VariableDefinition
-	locals      map[string]cty.Value
+	variables   map[string]*VariableDefinition // Stores decoded definitions
+	locals      map[string]cty.Value           // Stores evaluated locals
 	evalContext *hcl.EvalContext
 	initDiags   hcl.Diagnostics
 	evalMutex   sync.RWMutex
@@ -43,6 +46,8 @@ func LoadModule(
 ) (map[string]*hcl.File, *Module, error) {
 
 	logger = logger.WithFields(map[string]any{"component": "hcl_module_loader", "module_path": dirPath})
+	logger.Debugf(ctx, "Loading HCL module...")
+
 	parser := hclparse.NewParser()
 	files, parseDiags, err := parseHCLFiles(ctx, parser, dirPath, logger)
 	if err != nil {
@@ -65,18 +70,75 @@ func LoadModule(
 		logger:    logger,
 		path:      dirPath,
 		workspace: workspaceName,
-		inputVars: make(map[string]cty.Value),
 		initDiags: parseDiags,
+		variables: make(map[string]*VariableDefinition),
 	}
 
-	mod.initDiags = append(mod.initDiags, mod.loadVariables(ctx, parser, files, varFilePaths)...)
-	if DiagsHasFatalErrors(mod.initDiags) {
-		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "loading variables", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors loading variables")
+	// --- Step 1: Decode VARIABLE definitions using syntaxBody iteration ---
+	logger.Debugf(ctx, "Decoding variable definitions...")
+	var varDefDiags hcl.Diagnostics
+	definedVars := make(map[string]string)
+	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return files, mod, err
+		}
+		syntaxBody, ok := file.Body.(*hclsyntax.Body)
+		if !ok {
+			continue
+		}
+
+		for _, block := range syntaxBody.Blocks { // Iterate syntax blocks
+			if block.Type != "variable" {
+				continue
+			}
+
+			// Convert syntax block back to hcl.Block first
+			hclBlock := syntaxBlockToHclBlock(block, file.Body)
+			if hclBlock == nil {
+				varDefDiags = append(varDefDiags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal error", Detail: "Could not convert syntax variable block back to hcl.Block", Subject: &block.TypeRange}) // Use TypeRange for subject
+				continue
+			}
+
+			if len(hclBlock.Labels) != 1 {
+				defRange := hclBlock.DefRange // Get range from hcl.Block
+				varDefDiags = append(varDefDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Invalid variable block", Detail: "Variable block requires exactly one label (the name).", Subject: &defRange})
+				continue
+			}
+			varName := hclBlock.Labels[0]
+			blockDefRange := hclBlock.DefRange // Store range before potential modification
+			if prevPath, exists := definedVars[varName]; exists {
+				varDefDiags = append(varDefDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate variable definition", Detail: "Variable " + varName + " was already defined at " + prevPath, Subject: &blockDefRange}) // Use stored range
+				continue
+			}
+			// Corrected: Call Range() method then String()
+			definedVars[varName] = blockDefRange.String()
+
+			def, decodeDiags := decodeVariableBlock(hclBlock) // Use the hcl.Block
+			varDefDiags = append(varDefDiags, decodeDiags...)
+			if def != nil && !DiagsHasFatalErrors(decodeDiags) {
+				mod.variables[varName] = def
+			}
+		}
 	}
+	mod.initDiags = append(mod.initDiags, varDefDiags...)
+	if DiagsHasFatalErrors(mod.initDiags) {
+		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "decoding variables", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors decoding variable blocks")
+	}
+	logger.Debugf(ctx, "Decoded %d variable definitions", len(mod.variables))
+
+	// --- Step 2: Load tfvars and MERGE with defaults ---
+	var mergeDiags hcl.Diagnostics
+	mod.inputVars, mergeDiags = mergeVariablesAndDefaults(ctx, parser, mod.variables, varFilePaths, logger) // Pass decoded definitions
+	mod.initDiags = append(mod.initDiags, mergeDiags...)
+	if DiagsHasFatalErrors(mod.initDiags) {
+		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "merging variables", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors processing variable values")
+	}
+	logger.Debugf(ctx, "Final input variable count: %d", len(mod.inputVars))
 	if err := ctx.Err(); err != nil {
 		return files, mod, err
 	}
 
+	// --- Step 3: Build initial context ---
 	mod.initDiags = append(mod.initDiags, mod.buildInitialContext(ctx)...)
 	if DiagsHasFatalErrors(mod.initDiags) {
 		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "building initial context", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors building initial context")
@@ -85,110 +147,126 @@ func LoadModule(
 		return files, mod, err
 	}
 
-	mod.initDiags = append(mod.initDiags, mod.evaluateLocals(ctx, files)...)
+	// --- Step 4: Evaluate LOCALS ---
+	logger.Debugf(ctx, "Evaluating locals blocks...")
+	var localsDiags hcl.Diagnostics
+	definedLocals := make(map[string]string) // Use string range for key
+	evaluatedLocals := make(map[string]cty.Value)
+
+	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return files, mod, err
+		}
+		syntaxBody, ok := file.Body.(*hclsyntax.Body)
+		if !ok {
+			continue
+		}
+
+		for _, block := range syntaxBody.Blocks { // Iterate syntax blocks
+			if block.Type != "locals" {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return files, mod, err
+			}
+
+			for name, attr := range block.Body.Attributes { // Use syntax attributes
+				if err := ctx.Err(); err != nil {
+					return files, mod, err
+				}
+				attrNameRange := attr.NameRange // Store range before potential modification
+				if definedAtStr, exists := definedLocals[name]; exists {
+					localsDiags = append(localsDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate local value definition", Detail: "Local value " + name + " was already defined at " + definedAtStr, Subject: &attrNameRange}) // Use stored range
+					continue
+				}
+				// Corrected: Use attr.Range which is hcl.Range field, not Range() method
+				definedLocals[name] = ""
+
+				val, valDiags := attr.Expr.Value(mod.evalContext)
+				localsDiags = append(localsDiags, valDiags...)
+				if !DiagsHasFatalErrors(valDiags) {
+					evaluatedLocals[name] = val
+				}
+			}
+		}
+	}
+	mod.initDiags = append(mod.initDiags, localsDiags...)
 	if DiagsHasFatalErrors(mod.initDiags) {
 		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "evaluating locals", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors evaluating locals")
+	}
+
+	// Update context with evaluated locals
+	if len(evaluatedLocals) > 0 {
+		mod.evalMutex.Lock()
+		mod.locals = evaluatedLocals
+		if mod.evalContext != nil && mod.evalContext.Variables != nil {
+			mod.evalContext.Variables["local"] = cty.ObjectVal(evaluatedLocals)
+		} else {
+			mod.initDiags = append(mod.initDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Internal Error", Detail: "Evaluation context was nil before updating locals."})
+			mod.evalMutex.Unlock()
+			return files, mod, apperrors.New(apperrors.CodeInternal, "evaluation context nil before updating locals")
+		}
+		mod.evalMutex.Unlock()
+		logger.Debugf(ctx, "Evaluated and added %d local variables to context", len(evaluatedLocals))
+	} else {
+		logger.Debugf(ctx, "No local variables found or evaluated")
 	}
 	if err := ctx.Err(); err != nil {
 		return files, mod, err
 	}
 
+	// --- Final Check ---
 	if len(mod.initDiags) > 0 {
 		logger.Warnf(ctx, "Non-fatal diagnostics during module load:\n%s", mod.initDiags.Error())
 	}
-
+	logger.Debugf(ctx, "HCL module loaded successfully")
 	return files, mod, nil
 }
 
+// EvalContext remains the same
 func (m *Module) EvalContext() *hcl.EvalContext {
 	m.evalMutex.RLock()
 	defer m.evalMutex.RUnlock()
-	return m.evalContext
+	if m.evalContext == nil {
+		return nil
+	}
+	copiedVars := make(map[string]cty.Value, len(m.evalContext.Variables))
+	for k, v := range m.evalContext.Variables {
+		copiedVars[k] = v
+	}
+	return &hcl.EvalContext{Variables: copiedVars, Functions: m.evalContext.Functions}
 }
 
-func (m *Module) loadVariables(ctx context.Context, parser *hclparse.Parser, files map[string]*hcl.File, varFilePaths []string) hcl.Diagnostics {
+// mergeVariablesAndDefaults remains the same
+func mergeVariablesAndDefaults(ctx context.Context, parser *hclparse.Parser, definitions map[string]*VariableDefinition, varFilePaths []string, logger ports.Logger) (map[string]cty.Value, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
-	m.variables = make(map[string]*VariableDefinition)
-	var variableBlocks []*hcl.Block
-	schema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "variable", LabelNames: []string{"name"}}}}
-
-	for _, file := range files {
-		if err := ctx.Err(); err != nil {
-			return diags
-		}
-		content, contentDiags := file.Body.Content(schema)
-		diags = append(diags, contentDiags...)
-		for _, b := range content.Blocks {
-			if b.Type == "variable" {
-				variableBlocks = append(variableBlocks, b)
-			}
-		}
-	}
-	if DiagsHasFatalErrors(diags) {
-		return diags
-	}
-
-	definedVars := make(map[string]string)
-	for _, block := range variableBlocks {
-		if err := ctx.Err(); err != nil {
-			return diags
-		}
-		varName := block.Labels[0]
-		if prevPath, exists := definedVars[varName]; exists {
-			diags = diags.Append(&hcl.Diagnostic{
-				Severity: hcl.DiagError,
-				Summary:  "Duplicate variable definition",
-				Detail:   "Variable " + varName + " was already defined at " + prevPath,
-				Subject:  &block.DefRange,
-			})
-			continue
-		}
-		definedVars[varName] = block.DefRange.Filename
-
-		def, varDiags := decodeVariableBlock(block)
-		diags = append(diags, varDiags...)
-		if def != nil {
-			m.variables[varName] = def
-		}
-	}
-	if DiagsHasFatalErrors(diags) {
-		return diags
-	}
-
+	finalVars := make(map[string]cty.Value)
+	logger.Debugf(ctx, "Loading variables from tfvars files: %v", varFilePaths)
 	loadedTfVars := make(map[string]cty.Value)
 	varsFileAttrRanges := make(map[string]map[string]hcl.Range)
 
 	for _, path := range varFilePaths {
 		if err := ctx.Err(); err != nil {
-			return diags
+			logger.Warnf(ctx, "Context cancelled during tfvars loading")
+			return finalVars, diags
 		}
 		if path == "" {
 			continue
 		}
-		vars, loadDiags := loadVarsFromFile(ctx, parser, path, m.logger)
+
+		vars, loadDiags, attrRanges := loadVarsFromFile(ctx, parser, path, logger)
 		diags = append(diags, loadDiags...)
 		if DiagsHasFatalErrors(loadDiags) {
 			continue
 		}
-
-		varsFileAttrRanges[path] = make(map[string]hcl.Range)
-		parsedVarsFile, parseVarsDiags := parser.ParseHCLFile(path)
-		diags = append(diags, parseVarsDiags...)
-		if !DiagsHasFatalErrors(parseVarsDiags) && parsedVarsFile != nil {
-			attrsFromFile, attrDiags := parsedVarsFile.Body.JustAttributes()
-			diags = append(diags, attrDiags...)
-			if !DiagsHasFatalErrors(attrDiags) {
-				for name, attr := range attrsFromFile {
-					varsFileAttrRanges[path][name] = attr.Range
-				}
-			}
-		}
+		varsFileAttrRanges[path] = attrRanges
 
 		for name, val := range vars {
 			if err := ctx.Err(); err != nil {
-				return diags
+				logger.Warnf(ctx, "Context cancelled during tfvars processing")
+				return finalVars, diags
 			}
-			if _, defined := m.variables[name]; !defined {
+			if _, defined := definitions[name]; !defined {
 				var subjectRange *hcl.Range
 				if rangesMap, ok := varsFileAttrRanges[path]; ok {
 					if attrRange, attrOk := rangesMap[name]; attrOk {
@@ -198,49 +276,53 @@ func (m *Module) loadVariables(ctx context.Context, parser *hclparse.Parser, fil
 				if subjectRange == nil {
 					subjectRange = &hcl.Range{Filename: path}
 				}
-				diags = diags.Append(&hcl.Diagnostic{
-					Severity: hcl.DiagWarning,
-					Summary:  "Undefined variable in vars file",
-					Detail:   "Variable " + name + " is set in " + path + " but not defined in the module.",
-					Subject:  subjectRange,
-				})
+				diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Undefined variable in vars file", Detail: "Variable " + name + " is set in " + path + " but not defined.", Subject: subjectRange})
 			} else {
 				loadedTfVars[name] = val
 			}
 		}
 	}
+	logger.Debugf(ctx, "Loaded %d variables from tfvars files", len(loadedTfVars))
 	if DiagsHasFatalErrors(diags) {
-		return diags
+		return nil, diags
 	}
 
-	m.inputVars = make(map[string]cty.Value)
-	for name, def := range m.variables {
+	logger.Debugf(ctx, "Merging variables (tfvars override defaults)")
+	for name, def := range definitions {
 		if err := ctx.Err(); err != nil {
-			return diags
+			logger.Warnf(ctx, "Context cancelled during variable merging")
+			return finalVars, diags
 		}
+		var finalVal cty.Value
+		var convDiags hcl.Diagnostics
+		targetType := def.Type
+
 		if val, ok := loadedTfVars[name]; ok {
-			convVal, convDiags := ConvertVarType(val, def.Type, def.DeclRange)
+			// Use definition range for conversion diagnostic subject
+			finalVal, convDiags = convertVarType(val, targetType, def.DeclRange)
 			diags = append(diags, convDiags...)
-			if !DiagsHasFatalErrors(convDiags) {
-				m.inputVars[name] = convVal
-			}
 		} else if !def.Default.IsNull() && def.Default.IsKnown() {
-			m.inputVars[name] = def.Default
+			// Use definition range for conversion diagnostic subject
+			finalVal, convDiags = convertVarType(def.Default, targetType, def.DeclRange)
+			diags = append(diags, convDiags...)
 		} else {
-			diags = diags.Append(&hcl.Diagnostic{
-				Severity: hcl.DiagError,
-				Summary:  "Missing required variable",
-				Detail:   "Variable " + name + " has no default value and was not provided.",
-				Subject:  &def.DeclRange,
-			})
+			diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Missing required variable", Detail: "Variable " + name + " has no default value and was not provided.", Subject: &def.DeclRange})
+			continue
+		}
+
+		if !DiagsHasFatalErrors(convDiags) {
+			finalVars[name] = finalVal
 		}
 	}
-
-	return diags
+	logger.Debugf(ctx, "Final input variable count: %d", len(finalVars))
+	return finalVars, diags
 }
 
+// buildInitialContext remains the same
 func (m *Module) buildInitialContext(ctx context.Context) hcl.Diagnostics {
 	var diags hcl.Diagnostics
+	m.logger.Debugf(ctx, "Building initial evaluation context")
+
 	cwd, err := filepath.Abs(".")
 	if err != nil {
 		diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Failed to get current working directory", Detail: err.Error()})
@@ -261,71 +343,32 @@ func (m *Module) buildInitialContext(ctx context.Context) hcl.Diagnostics {
 		},
 		Functions: StandardFunctions(),
 	}
+	m.logger.Debugf(ctx, "Initial context built")
 	return diags
 }
 
-func (m *Module) evaluateLocals(ctx context.Context, files map[string]*hcl.File) hcl.Diagnostics {
-	var allDiags hcl.Diagnostics
-	locals := make(map[string]cty.Value)
-	definedLocals := make(map[string]string)
-	var localsBlocks []*hcl.Block
-	schema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "locals"}}}
+// Helper still needed for EvaluateBlock? Only if EvaluateBlock needs hcl.Block
+func syntaxBlockToHclBlock(syntaxBlock *hclsyntax.Block, parentBody hcl.Body) *hcl.Block {
+	// Find the corresponding hcl.Block using PartialContent again based on type and labels
+	schema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: syntaxBlock.Type, LabelNames: syntaxBlock.Labels}}}
+	content, _, _ := parentBody.PartialContent(schema) // Ignore diags for this helper
 
-	for _, file := range files {
-		if err := ctx.Err(); err != nil {
-			return allDiags
-		}
-		content, contentDiags := file.Body.Content(schema)
-		allDiags = append(allDiags, contentDiags...)
-		localsBlocks = append(localsBlocks, content.Blocks...)
-	}
-	if DiagsHasFatalErrors(allDiags) {
-		return allDiags
-	}
-
-	for _, block := range localsBlocks {
-		if err := ctx.Err(); err != nil {
-			return allDiags
-		}
-		attrs, attrDiags := block.Body.JustAttributes()
-		allDiags = append(allDiags, attrDiags...)
-		if DiagsHasFatalErrors(attrDiags) {
-			continue
-		}
-
-		for name, attr := range attrs {
-			if err := ctx.Err(); err != nil {
-				return allDiags
+	for _, b := range content.Blocks {
+		// Match based on type, labels and start position
+		if b.Type == syntaxBlock.Type && len(b.Labels) == len(syntaxBlock.Labels) && b.DefRange.Start == syntaxBlock.TypeRange.Start {
+			match := true
+			for i := range b.Labels {
+				if b.Labels[i] != syntaxBlock.Labels[i] {
+					match = false
+					break
+				}
 			}
-			if definedAt, exists := definedLocals[name]; exists {
-				allDiags = allDiags.Append(&hcl.Diagnostic{
-					Severity: hcl.DiagError,
-					Summary:  "Duplicate local value definition",
-					Detail:   "Local value " + name + " was already defined at " + definedAt,
-					Subject:  &attr.NameRange,
-				})
-				continue
-			}
-			definedLocals[name] = attr.NameRange.String()
-
-			val, valDiags := attr.Expr.Value(m.evalContext)
-			allDiags = append(allDiags, valDiags...)
-			if !DiagsHasFatalErrors(valDiags) {
-				locals[name] = val
+			if match {
+				return b
 			}
 		}
 	}
-
-	if DiagsHasFatalErrors(allDiags) {
-		return allDiags
-	}
-
-	if len(locals) > 0 {
-		m.evalMutex.Lock()
-		m.locals = locals
-		m.evalContext.Variables["local"] = cty.ObjectVal(locals)
-		m.evalMutex.Unlock()
-	}
-
-	return allDiags
+	return nil // Could not find match
 }
+
+// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/module.go ---

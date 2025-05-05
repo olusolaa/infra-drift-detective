@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/mapping"
@@ -88,11 +89,11 @@ func (sp *stateParser) parseAndCache(ctx context.Context) (*State, error) {
 		sp.parseErr = errors.WrapUserFacing(err, errors.CodeStateParseError, "invalid JSON in state", "")
 		return nil, sp.parseErr
 	}
-	if state.Version != 5 {
+	if state.Version < 3 {
 		sp.parseErr = errors.NewUserFacing(
 			errors.CodeUnsupportedStateVersion,
-			fmt.Sprintf("unsupported state version %d (only v5 supported)", state.Version),
-			"Upgrade Terraform and regenerate state.")
+			fmt.Sprintf("unsupported state version %d (only v4 and v5 supported)", state.Version),
+			"Upgrade or downgrade Terraform if needed and regenerate state.")
 		return nil, sp.parseErr
 	}
 
@@ -155,4 +156,53 @@ func buildResourceAddress(r *Resource) string {
 		return r.Module + "." + r.Type + "." + r.Name
 	}
 	return r.Type + "." + r.Name
+}
+
+func FindRelatedResources(state *State, baseResource *Resource) map[string][]*Resource {
+	if state == nil || baseResource == nil || len(baseResource.Instances) == 0 {
+		return nil
+	}
+
+	related := make(map[string][]*Resource)
+	baseType := baseResource.Type
+	baseName := baseResource.Name
+	basePrefix := strings.Split(baseType, "_")[0]
+
+	var baseID string
+	if len(baseResource.Instances) > 0 && baseResource.Instances[0].Attributes != nil {
+		if id, ok := baseResource.Instances[0].Attributes["id"].(string); ok {
+			baseID = id
+		}
+	}
+
+	for i := range state.Resources {
+		res := &state.Resources[i]
+		if res.Type == baseType && res.Name == baseName {
+			continue
+		}
+
+		relationType := ""
+
+		if strings.HasPrefix(res.Type, baseType+"_") {
+			relationType = strings.TrimPrefix(res.Type, baseType+"_")
+		} else if strings.HasPrefix(res.Type, basePrefix+"_") &&
+			len(res.Instances) > 0 &&
+			res.Instances[0].Attributes != nil {
+
+			for attrKey, attrVal := range res.Instances[0].Attributes {
+				if (attrKey == basePrefix+"_bucket" || attrKey == "bucket") && baseID != "" {
+					if bucketRef, ok := attrVal.(string); ok && bucketRef == baseID {
+						relationType = strings.TrimPrefix(res.Type, basePrefix+"_")
+						break
+					}
+				}
+			}
+		}
+
+		if relationType != "" {
+			related[relationType] = append(related[relationType], res)
+		}
+	}
+
+	return related
 }

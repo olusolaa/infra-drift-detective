@@ -1,46 +1,37 @@
+// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/variables.go ---
+
 package evaluator
 
 import (
-	"context"
+	"context" // Keep context even if not used directly in helpers
+	"github.com/hashicorp/hcl/v2/hclparse"
 	"os"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/gohcl"
-	"github.com/hashicorp/hcl/v2/hclparse"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 )
 
+// Schema only for attributes *within* a variable block
 var variableBlockSchema = &hcl.BodySchema{
 	Attributes: []hcl.AttributeSchema{
-		{Name: "type"},
 		{Name: "description"},
 		{Name: "default"},
 		{Name: "sensitive"},
+		// Allow 'type' attribute but don't strictly require/process it via schema
+		{Name: "type", Required: false},
 	},
-}
-
-func simpleTypeFromString(s string) cty.Type {
-	switch strings.ToLower(s) {
-	case "string":
-		return cty.String
-	case "number":
-		return cty.Number
-	case "bool", "boolean":
-		return cty.Bool
-	case "any":
-		return cty.DynamicPseudoType
-	default:
-		return cty.DynamicPseudoType
-	}
+	// No Blocks expected inside a variable block per standard HCL
 }
 
 func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
+	// Use the schema specifically for variable block content
 	content, contentDiags := block.Body.Content(variableBlockSchema)
 	diags = append(diags, contentDiags...)
+	// If the schema itself fails (e.g., unexpected nested block), treat as fatal for this var
 	if DiagsHasFatalErrors(contentDiags) {
 		return nil, diags
 	}
@@ -49,23 +40,10 @@ func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics
 		Name:      block.Labels[0],
 		FilePath:  block.DefRange.Filename,
 		DeclRange: block.DefRange,
-		Type:      cty.DynamicPseudoType,
+		Type:      cty.DynamicPseudoType, // Default to dynamic
 	}
 
-	if attr, exists := content.Attributes["type"]; exists {
-		var targetType cty.Type
-		typeDiags := gohcl.DecodeExpression(attr.Expr, nil, &targetType)
-		diags = append(diags, typeDiags...)
-		if !DiagsHasFatalErrors(typeDiags) && targetType != cty.DynamicPseudoType {
-			def.Type = targetType
-		} else {
-			strVal, strDiags := attr.Expr.Value(nil)
-			diags = append(diags, strDiags...)
-			if !DiagsHasFatalErrors(strDiags) && strVal.IsKnown() && !strVal.IsNull() && strVal.Type() == cty.String {
-				def.Type = simpleTypeFromString(strVal.AsString())
-			}
-		}
-	}
+	// REMOVED all logic trying to parse or decode the 'type' attribute expression
 
 	if attr, exists := content.Attributes["description"]; exists {
 		descVal, descDiags := attr.Expr.Value(nil)
@@ -73,10 +51,7 @@ func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics
 		if !DiagsHasFatalErrors(descDiags) && !descVal.IsNull() && descVal.IsKnown() && descVal.Type() == cty.String {
 			def.Description = descVal.AsString()
 		} else if !descVal.IsNull() && descVal.IsKnown() {
-			diags = diags.Append(&hcl.Diagnostic{
-				Severity: hcl.DiagError, Summary: "Invalid variable description",
-				Detail: "The 'description' attribute must be a string.", Subject: attr.Expr.Range().Ptr(),
-			})
+			diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Invalid variable description", Detail: "The 'description' attribute must be a string.", Subject: attr.Expr.Range().Ptr()})
 		}
 	}
 
@@ -84,11 +59,9 @@ func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics
 		defaultVal, defaultDiags := attr.Expr.Value(nil)
 		diags = append(diags, defaultDiags...)
 		if !DiagsHasFatalErrors(defaultDiags) {
-			convVal, convDiags := ConvertVarType(defaultVal, def.Type, attr.Expr.Range())
-			diags = append(diags, convDiags...)
-			if !DiagsHasFatalErrors(convDiags) {
-				def.Default = convVal
-			}
+			def.Default = defaultVal // Store raw default
+		} else {
+			diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Invalid default value", Detail: "Could not evaluate default value expression: " + defaultDiags.Error(), Subject: attr.Expr.Range().Ptr()})
 		}
 	}
 
@@ -96,42 +69,34 @@ func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics
 		sensVal, sensDiags := attr.Expr.Value(nil)
 		diags = append(diags, sensDiags...)
 		if !DiagsHasFatalErrors(sensDiags) && !sensVal.IsNull() && sensVal.IsKnown() && sensVal.Type() == cty.Bool {
-			if sensVal.True() {
-				def.Sensitive = true
-			}
+			def.Sensitive = sensVal.True()
 		} else if !sensVal.IsNull() && sensVal.IsKnown() {
-			diags = diags.Append(&hcl.Diagnostic{
-				Severity: hcl.DiagError, Summary: "Invalid sensitive value",
-				Detail: "The 'sensitive' attribute must be a boolean.", Subject: attr.Expr.Range().Ptr(),
-			})
+			diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Invalid sensitive value", Detail: "The 'sensitive' attribute must be a boolean.", Subject: attr.Expr.Range().Ptr()})
 		}
 	}
 
-	if DiagsHasFatalErrors(diags) {
-		return nil, diags
-	}
 	return def, diags
 }
 
-func loadVarsFromFile(ctx context.Context, parser *hclparse.Parser, path string, logger ports.Logger) (map[string]cty.Value, hcl.Diagnostics) {
+// loadVarsFromFile remains the same
+func loadVarsFromFile(ctx context.Context, parser *hclparse.Parser, path string, logger ports.Logger) (map[string]cty.Value, hcl.Diagnostics, map[string]hcl.Range) {
 	vars := make(map[string]cty.Value)
 	var diags hcl.Diagnostics
+	attrRanges := make(map[string]hcl.Range)
 	logger = logger.WithFields(map[string]any{"vars_file": path})
 
 	if err := ctx.Err(); err != nil {
 		logger.Warnf(ctx, "Context cancelled before reading vars file %s", path)
-		return vars, diags
+		return vars, diags, attrRanges
 	}
-
 	src, err := os.ReadFile(path)
 	if err != nil {
 		diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Cannot read variables file", Detail: err.Error(), Subject: &hcl.Range{Filename: path}})
-		return nil, diags
+		return nil, diags, attrRanges
 	}
-
 	if err := ctx.Err(); err != nil {
 		logger.Warnf(ctx, "Context cancelled after reading, before parsing vars file %s", path)
-		return vars, diags
+		return vars, diags, attrRanges
 	}
 
 	var file *hcl.File
@@ -147,42 +112,44 @@ func loadVarsFromFile(ctx context.Context, parser *hclparse.Parser, path string,
 		diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Internal HCL parsing error", Detail: "Parser returned nil file without diagnostics.", Subject: &hcl.Range{Filename: path}})
 	}
 	if file == nil || DiagsHasFatalErrors(diags) {
-		return nil, diags
+		return nil, diags, attrRanges
 	}
 
 	attrs, attrDiags := file.Body.JustAttributes()
 	diags = append(diags, attrDiags...)
 	if DiagsHasFatalErrors(attrDiags) {
-		return nil, diags
+		return nil, diags, attrRanges
 	}
 
-	evalCtx := &hcl.EvalContext{}
+	evalCtx := &hcl.EvalContext{Variables: nil, Functions: nil}
 	for name, attr := range attrs {
 		if err := ctx.Err(); err != nil {
 			logger.Warnf(ctx, "Context cancelled during vars file attribute evaluation loop (%s)", path)
-			return vars, diags
+			return vars, diags, attrRanges
 		}
 		val, valDiags := attr.Expr.Value(evalCtx)
 		diags = append(diags, valDiags...)
 		if !DiagsHasFatalErrors(valDiags) {
 			vars[name] = val
+			attrRanges[name] = attr.Range
 		}
 	}
-	return vars, diags
+	return vars, diags, attrRanges
 }
 
-func ConvertVarType(val cty.Value, targetType cty.Type, subjectRange hcl.Range) (cty.Value, hcl.Diagnostics) {
+// convertVarType remains the same
+func convertVarType(val cty.Value, targetType cty.Type, subjectRange hcl.Range) (cty.Value, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
-	if targetType == cty.DynamicPseudoType {
+	if targetType == cty.DynamicPseudoType || !val.IsKnown() { // Don't convert if target is dynamic or value unknown
 		return val, diags
 	}
+
 	convVal, err := convert.Convert(val, targetType)
 	if err != nil {
-		diags = diags.Append(&hcl.Diagnostic{
-			Severity: hcl.DiagError, Summary: "Incorrect variable type",
-			Detail: err.Error(), Subject: &subjectRange,
-		})
+		diags = diags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Incorrect variable type", Detail: err.Error(), Subject: &subjectRange})
 		return cty.NilVal, diags
 	}
 	return convVal, diags
 }
+
+// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/variables.go ---

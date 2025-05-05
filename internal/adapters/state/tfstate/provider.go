@@ -17,22 +17,24 @@ type Provider struct {
 }
 
 type Config struct {
-	FilePath string `yaml:"path" validate:"required,file"`
+	FilePath string `yaml:"path" mapstructure:"path" validate:"required"`
 }
 
 func NewProvider(cfg Config, logger ports.Logger) (*Provider, error) {
-	if cfg.FilePath == "" {
-		return nil, errors.New(errors.CodeConfigValidation,
-			"terraform‑state provider requires a non‑empty file path")
+	// If FilePath is empty, use a default
+	filePath := cfg.FilePath
+	if filePath == "" {
+		filePath = "terraform.tfstate" // Only use default if not specified in config
+		logger.Debugf(nil, "No state file path specified, using default: %s", filePath)
 	}
 
 	plog := logger.WithFields(map[string]any{
 		"provider":   ProviderTypeTFState,
-		"state_file": cfg.FilePath,
+		"state_file": filePath,
 	})
 
 	return &Provider{
-		parser: newStateParser(cfg.FilePath, plog),
+		parser: newStateParser(filePath, plog),
 		logger: plog,
 	}, nil
 }
@@ -51,38 +53,32 @@ func (p *Provider) ListResources(
 		return nil, ctx.Err()
 	}
 
-	st, err := p.parser.parseAndCache(ctx)
+	state, err := p.parser.parseAndCache(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, errors.CodeStateReadError,
-			"failed to parse state file for listing")
+		return nil, errors.Wrap(err, errors.CodeStateProviderError,
+			"parsing terraform state file for ListResources")
 	}
 
-	rawRes, err := findResourcesInState(st, kind, p.logger)
+	results := make([]domain.StateResource, 0)
+
+	resources, err := findResourcesInState(state, kind, p.logger)
 	if err != nil {
-		return nil, errors.Wrap(err, errors.CodeInternal,
-			"failed to filter resources in state")
+		return nil, err
 	}
 
-	out := make([]domain.StateResource, 0, len(rawRes))
-	for _, r := range rawRes {
-		// every *instance* becomes one domain.StateResource
-		for idx := range r.Instances {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+	for _, tfRes := range resources {
+		for _, inst := range tfRes.Instances {
+			mappedResource, err := mapRawInstanceToDomain(tfRes, &inst, p.logger, state)
+			if err != nil {
+				return nil, errors.Wrap(err, errors.CodeStateProviderError,
+					fmt.Sprintf("parsing resource %s [%s.%s]",
+						tfRes.Type, tfRes.Mode, tfRes.Name))
 			}
-
-			inst := &r.Instances[idx]
-			mapped, mapErr := mapRawInstanceToDomain(r, inst, p.logger)
-			if mapErr != nil {
-				addr := fmt.Sprintf("%s.%s", r.Type, r.Name)
-				p.logger.Errorf(ctx, mapErr,
-					"skipping resource %s instance %d", addr, idx)
-				continue
-			}
-			out = append(out, mapped)
+			results = append(results, mappedResource)
 		}
 	}
-	return out, nil
+
+	return results, nil
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -93,31 +89,25 @@ func (p *Provider) GetResource(
 	kind domain.ResourceKind,
 	identifier string,
 ) (domain.StateResource, error) {
-
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
 
-	st, err := p.parser.parseAndCache(ctx)
+	state, err := p.parser.parseAndCache(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, errors.CodeStateReadError,
-			fmt.Sprintf("failed to parse state file for %s", identifier))
+		return nil, errors.Wrap(err, errors.CodeStateProviderError,
+			"parsing terraform state file for GetResource")
 	}
 
-	res, err := findSpecificResource(st, kind, identifier, p.logger)
+	res, err := findSpecificResource(state, kind, identifier, p.logger)
 	if err != nil {
-		return nil, err // already typed (CodeResourceNotFound etc.)
+		return nil, err
 	}
 
 	if len(res.Instances) == 0 {
 		return nil, errors.New(errors.CodeResourceNotFound,
-			fmt.Sprintf("resource %s has no instances", identifier))
+			fmt.Sprintf("resource '%s.%s' has no instances", res.Type, res.Name))
 	}
 
-	mapped, mapErr := mapRawInstanceToDomain(res, &res.Instances[0], p.logger)
-	if mapErr != nil {
-		return nil, errors.Wrap(mapErr, errors.CodeMappingError,
-			fmt.Sprintf("failed to map resource %s", identifier))
-	}
-	return mapped, nil
+	return mapRawInstanceToDomain(res, &res.Instances[0], p.logger, state)
 }

@@ -1,3 +1,5 @@
+// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/evaluator.go ---
+
 package evaluator
 
 import (
@@ -5,10 +7,13 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 )
 
 type EvaluatedResource map[string]any
+
+// REMOVED permissiveBlockContentSchema
 
 func EvaluateBlock(
 	ctx context.Context,
@@ -30,26 +35,28 @@ func EvaluateBlock(
 	evaluatedContent := make(EvaluatedResource)
 	var allDiags hcl.Diagnostics
 
-	attrs, attrParseDiags := block.Body.JustAttributes()
-	filteredAttrDiags := filterUnsupportedDiags(attrParseDiags)
-	allDiags = append(allDiags, filteredAttrDiags...)
-	if DiagsHasFatalErrors(filteredAttrDiags) {
+	// Process Attributes directly using JustAttributes
+	attrs, attrDiags := block.Body.JustAttributes()
+	allDiags = append(allDiags, attrDiags...)
+	// Check for fatal errors *parsing* attributes definition
+	if DiagsHasFatalErrors(allDiags) {
 		blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: allDiags}, "Fatal errors parsing attributes, stopping evaluation")
 		return nil, allDiags
 	}
 
 	for name, attr := range attrs {
 		if err := ctx.Err(); err != nil {
-			blockLogger.Warnf(ctx, "Context cancelled during attribute evaluation loop")
+			blockLogger.Warnf(ctx, "Context cancelled during attribute evaluation")
 			return evaluatedContent, allDiags
 		}
 		attrLogger := blockLogger.WithFields(map[string]any{"attribute": name})
 		val, valEvalDiags := attr.Expr.Value(evalCtx)
-		filteredValDiags := filterUnsupportedDiags(valEvalDiags)
-		allDiags = append(allDiags, filteredValDiags...)
+		// Filter unsupported *evaluation* errors if needed, but usually eval errors are real errors
+		filteredValEvalDiags := filterUnsupportedDiags(valEvalDiags)
+		allDiags = append(allDiags, filteredValEvalDiags...)
 
-		if DiagsHasFatalErrors(filteredValDiags) {
-			attrLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: filteredValDiags}, "Failed evaluation")
+		if DiagsHasFatalErrors(filteredValEvalDiags) { // Check filtered diags
+			attrLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: valEvalDiags}, "Failed evaluation") // Log original
 			continue
 		}
 		if !val.IsKnown() {
@@ -60,38 +67,47 @@ func EvaluateBlock(
 		goVal, err := ConvertCtyValue(ctx, val, attrLogger)
 		if err != nil {
 			attrLogger.Errorf(ctx, err, "Failed cty->Go conversion")
-			allDiags = allDiags.Append(&hcl.Diagnostic{
-				Severity: hcl.DiagError, Summary: "Internal value conversion error",
-				Detail: err.Error(), Subject: attr.Expr.Range().Ptr(),
-			})
+			allDiags = allDiags.Append(&hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Internal value conversion error", Detail: err.Error(), Subject: attr.Expr.Range().Ptr()})
 			continue
 		}
 		evaluatedContent[name] = goVal
 	}
 
-	nestedBlocks, nestedContentDiags := block.Body.Content(blockContentSchema)
-	allDiags = append(allDiags, nestedContentDiags...)
-
-	if len(nestedBlocks.Blocks) > 0 {
-		blockLogger.Debugf(ctx, "Evaluating %d nested blocks...", len(nestedBlocks.Blocks))
-		for _, nestedBlock := range nestedBlocks.Blocks {
+	// Process Nested Blocks using syntaxBody iteration
+	syntaxBody, ok := block.Body.(*hclsyntax.Body)
+	if !ok {
+		blockLogger.Warnf(ctx, "Could not cast block body to syntax body, skipping nested block evaluation")
+	} else if len(syntaxBody.Blocks) > 0 {
+		blockLogger.Debugf(ctx, "Evaluating %d nested blocks...", len(syntaxBody.Blocks))
+		for _, nestedSyntaxBlock := range syntaxBody.Blocks {
 			if err := ctx.Err(); err != nil {
-				blockLogger.Warnf(ctx, "Context cancelled during nested block evaluation loop")
+				blockLogger.Warnf(ctx, "Context cancelled during nested block evaluation")
 				return evaluatedContent, allDiags
 			}
-			evaluatedNested, blockDiags := EvaluateBlock(ctx, nestedBlock, evalCtx, blockLogger)
-			filteredBlockDiags := filterUnsupportedDiags(blockDiags)
+
+			// Convert syntax block back to hcl.Block for recursive call
+			hclNestedBlock := syntaxBlockToHclBlock(nestedSyntaxBlock, block.Body)
+			if hclNestedBlock == nil {
+				blockLogger.Warnf(ctx, "Failed to convert syntax block %s back to hcl.Block, skipping", nestedSyntaxBlock.Type)
+				continue
+			}
+
+			evaluatedNested, blockDiags := EvaluateBlock(ctx, hclNestedBlock, evalCtx, blockLogger)
+			filteredBlockDiags := filterUnsupportedDiags(blockDiags) // Filter nested block diags
 			allDiags = append(allDiags, filteredBlockDiags...)
 
-			if DiagsHasFatalErrors(filteredBlockDiags) {
-				blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: filteredBlockDiags}, "Skipping nested block '%s' due to fatal errors", nestedBlock.Type)
+			if DiagsHasFatalErrors(filteredBlockDiags) { // Check filtered nested diags
+				blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: blockDiags}, "Skipping nested block '%s' due to fatal errors within it", nestedSyntaxBlock.Type) // Log original
 				continue
 			}
 			if evaluatedNested == nil {
+				if !DiagsHasFatalErrors(blockDiags) {
+					blockLogger.Debugf(ctx, "Nested block '%s' evaluation yielded no content or only warnings, not storing", nestedSyntaxBlock.Type)
+				}
 				continue
 			}
 
-			key := nestedBlock.Type
+			key := nestedSyntaxBlock.Type
 			if existingValue, exists := evaluatedContent[key]; exists {
 				if slice, ok := existingValue.([]any); ok {
 					evaluatedContent[key] = append(slice, evaluatedNested)
@@ -104,32 +120,32 @@ func EvaluateBlock(
 		}
 	}
 
+	// Return nil content if fatal errors occurred ANYWHERE during evaluation
 	if DiagsHasFatalErrors(allDiags) {
-		blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: allDiags}, "Errors during block evaluation")
+		blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: allDiags}, "Errors encountered during block evaluation")
+		return nil, allDiags
 	} else if len(allDiags) > 0 {
 		blockLogger.Warnf(ctx, "Non-fatal diagnostics during block evaluation:\n%s", allDiags.Error())
 	}
 
 	blockLogger.Debugf(ctx, "Finished evaluation of block")
-	if DiagsHasFatalErrors(allDiags) {
-		return nil, allDiags
-	}
 	return evaluatedContent, allDiags
 }
 
-var blockContentSchema = &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "*"}}}
-
+// filterUnsupportedDiags remains the same
 func filterUnsupportedDiags(diags hcl.Diagnostics) hcl.Diagnostics {
 	if len(diags) == 0 {
 		return diags
 	}
 	var filteredDiags hcl.Diagnostics
 	for _, diag := range diags {
-		isUnsupported := diag.Severity == hcl.DiagError &&
-			(strings.Contains(diag.Summary, "Unsupported argument") || strings.Contains(diag.Summary, "Unsupported block type"))
-		if !isUnsupported {
+		isUnsupportedArg := strings.Contains(diag.Summary, "Unsupported argument")
+		isUnsupportedBlock := strings.Contains(diag.Summary, "Unsupported block type")
+		if !(diag.Severity == hcl.DiagError && (isUnsupportedArg || isUnsupportedBlock)) {
 			filteredDiags = append(filteredDiags, diag)
 		}
 	}
 	return filteredDiags
 }
+
+// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/evaluator.go ---

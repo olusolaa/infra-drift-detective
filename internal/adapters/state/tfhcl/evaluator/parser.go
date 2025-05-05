@@ -1,3 +1,5 @@
+// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/parser.go ---
+
 package evaluator
 
 import (
@@ -9,6 +11,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/hashicorp/hcl/v2/hclsyntax" // Import for Body cast
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/mapping"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
@@ -27,7 +30,6 @@ func parseHCLFiles(ctx context.Context, parser *hclparse.Parser, dirPath string,
 	foundHCLFiles := false
 	logger.Debugf(ctx, "Scanning directory for HCL files...")
 	for _, entry := range entries {
-		// Check context at the start of each iteration
 		if err := ctx.Err(); err != nil {
 			logger.Warnf(ctx, "Context cancelled during HCL file parsing loop")
 			return files, allDiags, err
@@ -45,7 +47,6 @@ func parseHCLFiles(ctx context.Context, parser *hclparse.Parser, dirPath string,
 
 		var file *hcl.File
 		var diags hcl.Diagnostics
-		// File reading and parsing itself isn't context aware here
 		if strings.HasSuffix(fileName, ".tf.json") {
 			file, diags = parser.ParseJSONFile(filePath)
 		} else {
@@ -56,10 +57,12 @@ func parseHCLFiles(ctx context.Context, parser *hclparse.Parser, dirPath string,
 		if file != nil {
 			files[filePath] = file
 		} else if !DiagsHasFatalErrors(diags) {
+			// Use a valid range for the subject, like the start of the file
+			subjectRange := hcl.Range{Filename: filePath, Start: hcl.Pos{Line: 1, Column: 1}, End: hcl.Pos{Line: 1, Column: 1}}
 			allDiags = allDiags.Append(&hcl.Diagnostic{
 				Severity: hcl.DiagError, Summary: "Internal HCL parsing error",
 				Detail:  "Parser returned nil file without fatal diagnostics.",
-				Subject: &hcl.Range{Filename: filePath},
+				Subject: &subjectRange, // Use a default range
 			})
 			fileLogger.Errorf(ctx, nil, "Internal HCL parsing error: nil file without fatal diagnostics")
 		} else {
@@ -75,24 +78,35 @@ func parseHCLFiles(ctx context.Context, parser *hclparse.Parser, dirPath string,
 	return files, allDiags, nil
 }
 
+// FindResourceBlocksOfType iterates through syntax blocks directly.
 func FindResourceBlocksOfType(hclFiles map[string]*hcl.File, requestedKind domain.ResourceKind) ([]*hcl.Block, hcl.Diagnostics) {
 	var blocks []*hcl.Block
 	var diags hcl.Diagnostics
-	resourceSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource", LabelNames: []string{"type", "name"}}}}
 
 	for _, file := range hclFiles {
 		if file == nil || file.Body == nil {
 			continue
 		}
-		content, contentDiags := file.Body.Content(resourceSchema)
-		diags = append(diags, contentDiags...)
+		syntaxBody, ok := file.Body.(*hclsyntax.Body)
+		if !ok {
+			// Corrected: Call method, store result, take address
+			missingRange := file.Body.MissingItemRange()
+			diags = append(diags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal Error", Detail: "Could not cast file body to syntax body.", Subject: &missingRange})
+			continue
+		}
 
-		for _, block := range content.Blocks {
+		for _, block := range syntaxBody.Blocks {
 			if block.Type == "resource" && len(block.Labels) == 2 {
 				tfType := block.Labels[0]
 				kind, err := mapping.MapTfTypeToDomainKind(tfType)
 				if err == nil && kind == requestedKind {
-					blocks = append(blocks, block)
+					hclBlock := syntaxBlockToHclBlock(block, file.Body)
+					if hclBlock != nil {
+						blocks = append(blocks, hclBlock)
+					} else {
+						blockTypeRange := block.TypeRange // Get range from syntax block
+						diags = append(diags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal Error", Detail: fmt.Sprintf("Could not convert syntax block %s back to hcl.Block", block.Type), Subject: &blockTypeRange})
+					}
 				}
 			}
 		}
@@ -100,11 +114,11 @@ func FindResourceBlocksOfType(hclFiles map[string]*hcl.File, requestedKind domai
 	return blocks, diags
 }
 
+// FindSpecificResourceBlock iterates through syntax blocks directly.
 func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string) (*hcl.Block, hcl.Diagnostics) {
 	var foundBlock *hcl.Block
 	var firstPath string
 	var diags hcl.Diagnostics
-	resourceSchema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: "resource", LabelNames: []string{"type", "name"}}}}
 
 	parts := strings.SplitN(identifier, ".", 2)
 	if len(parts) != 2 {
@@ -117,24 +131,34 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 		if file == nil || file.Body == nil {
 			continue
 		}
-		content, contentDiags := file.Body.Content(resourceSchema)
-		diags = append(diags, contentDiags...)
-		if DiagsHasFatalErrors(contentDiags) {
-			return nil, diags
+		syntaxBody, ok := file.Body.(*hclsyntax.Body)
+		if !ok {
+			// Corrected: Call method, store result, take address
+			missingRange := file.Body.MissingItemRange()
+			diags = append(diags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal Error", Detail: "Could not cast file body to syntax body.", Subject: &missingRange})
+			continue
 		}
 
-		for _, block := range content.Blocks {
+		for _, block := range syntaxBody.Blocks {
 			if block.Type == "resource" && len(block.Labels) == 2 {
 				if block.Labels[0] == expectedType && block.Labels[1] == expectedName {
+					hclBlock := syntaxBlockToHclBlock(block, file.Body)
+					if hclBlock == nil {
+						blockTypeRange := block.TypeRange // Get range from syntax block
+						diags = append(diags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal Error", Detail: fmt.Sprintf("Could not convert found syntax block %s back to hcl.Block", block.Type), Subject: &blockTypeRange})
+						continue
+					}
+
 					if foundBlock != nil {
+						duplicateRange := hclBlock.DefRange
 						diags = diags.Append(&hcl.Diagnostic{
 							Severity: hcl.DiagError, Summary: "Duplicate resource definition",
 							Detail:  fmt.Sprintf("Resource %s defined in %s and %s.", identifier, firstPath, path),
-							Subject: &block.DefRange,
+							Subject: &duplicateRange,
 						})
 						return nil, diags
 					}
-					foundBlock = block
+					foundBlock = hclBlock
 					firstPath = path
 				}
 			}
@@ -147,3 +171,5 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 func isValidHCLFileName(name string) bool {
 	return strings.HasSuffix(name, ".tf") || strings.HasSuffix(name, ".tf.json")
 }
+
+// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/parser.go ---

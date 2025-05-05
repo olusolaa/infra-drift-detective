@@ -28,9 +28,9 @@ type Provider struct {
 }
 
 type Config struct {
-	Directory string   `yaml:"directory" validate:"required,dir"`
-	VarFiles  []string `yaml:"var_files" validate:"omitempty,dive,file"`
-	Workspace string   `yaml:"workspace" validate:"required"`
+	Directory string   `yaml:"directory" mapstructure:"directory" validate:"required,dir"`
+	VarFiles  []string `yaml:"var_files" mapstructure:"var_files" validate:"omitempty,dive,file"`
+	Workspace string   `yaml:"workspace" mapstructure:"workspace" validate:"required"`
 }
 
 func NewProvider(cfg Config, logger ports.Logger) (*Provider, error) {
