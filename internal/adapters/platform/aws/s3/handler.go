@@ -21,7 +21,6 @@ import (
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	idderrors "github.com/olusolaa/infra-drift-detector/internal/errors"
-	"golang.org/x/sync/errgroup"
 )
 
 type S3Handler struct {
@@ -149,66 +148,60 @@ func (h *S3Handler) ListResources(
 	logger ports.Logger,
 	out chan<- domain.PlatformResource,
 ) error {
-	defer close(out)
-
+	// Process sequentially for safety, avoiding complex goroutine management
+	// that was causing channel-related race conditions
 	client := h.s3Client
 
+	// Get account ID which is needed for bucket resources
+	accountID, accountErr := h.getAccountID(ctx, logger)
+	if accountErr != nil {
+		logger.Warnf(ctx, "Failed to get account ID for listing S3 buckets: %v", accountErr)
+	}
+
+	// NOTE: No longer closing channel here, the provider handles that
+
+	// Get the list of buckets
 	if err := h.limiter.Wait(ctx, logger); err != nil {
 		return err
 	}
+
 	listOutput, err := client.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return h.errorHandler.Handle("S3", "ListBuckets", err, ctx)
 	}
 
-	accountID, accountErr := h.getAccountID(ctx, logger) // Capture potential error
-	if accountErr != nil {
-		// If we can't get account ID, we can't list buckets associated with it.
-		logger.Warnf(ctx, "Failed to get account ID for listing S3 buckets, skipping list: %v", accountErr)
-		return fmt.Errorf("failed to get AWS account ID needed for S3 listing: %w", accountErr)
-	}
-
-	const concurrencyLimit = 10
-	sem := make(chan struct{}, concurrencyLimit)
-	g, childCtx := errgroup.WithContext(ctx)
-
+	// Process each bucket sequentially
 	for _, bucket := range listOutput.Buckets {
-		bucket := bucket
-		g.Go(func() error {
-			select {
-			case sem <- struct{}{}:
-			case <-childCtx.Done():
-				return childCtx.Err()
-			}
-			defer func() { <-sem }()
-
-			bucketName := aws.ToString(bucket.Name)
-			if bucketName == "" {
-				return nil
-			}
-			res, buildErr := h.builder.Build(childCtx, bucketName, accountID, cfg, logger)
-			if buildErr != nil {
-				logger.Warnf(childCtx, "Error building S3 resource for bucket %s: %v", bucketName, buildErr)
-				return nil // Continue with other buckets
-			}
-			select {
-			case out <- res:
-			case <-childCtx.Done():
-				return childCtx.Err()
-			}
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		// Check if it's a cancellation error
-		if err == context.Canceled || err == context.DeadlineExceeded {
-			// Return the cancellation error directly to notify callers
-			return err
+		// Check for context cancellation
+		select {
+		case <-ctx.Done():
+			logger.Warnf(ctx, "Context cancelled during S3 bucket processing")
+			return ctx.Err()
+		default:
+			// Continue processing
 		}
-		// For other errors, wrap with more context
-		return idderrors.Wrap(err, idderrors.CodeInternal, "error occurred during concurrent S3 resource building coordination")
+
+		bucketName := aws.ToString(bucket.Name)
+		if bucketName == "" {
+			continue
+		}
+
+		// Build the resource
+		res, buildErr := h.builder.Build(ctx, bucketName, accountID, cfg, logger)
+		if buildErr != nil {
+			logger.Warnf(ctx, "Error building S3 resource for bucket %s: %v", bucketName, buildErr)
+			continue
+		}
+
+		// Send to output channel with context check
+		select {
+		case out <- res:
+			// Successfully sent
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+
 	return nil
 }
 

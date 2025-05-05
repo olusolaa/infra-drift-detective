@@ -14,7 +14,7 @@ const MatcherTypeTag = "tag"
 type Config struct {
 	// TagKey specifies the tag key used to store the unique source identifier
 	// (e.g., Terraform address) on the actual cloud resource.
-	TagKey string `yaml:"key"`
+	TagKey string `yaml:"key" mapstructure:"key"`
 }
 
 type Matcher struct {

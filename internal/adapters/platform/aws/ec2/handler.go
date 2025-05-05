@@ -148,8 +148,6 @@ func (h *EC2Handler) ListResources(
 	logger ports.Logger,
 	out chan<- domain.PlatformResource,
 ) error {
-	defer close(out)
-
 	client := h.ec2Client // Use the injected client
 	ec2Filters := BuildEC2Filters(filters)
 	input := &ec2.DescribeInstancesInput{Filters: ec2Filters}
@@ -223,7 +221,12 @@ func (h *EC2Handler) ListResources(
 		}
 	}
 
-	if err := g.Wait(); err != nil {
+	// Now wait for all goroutines to finish
+	err := g.Wait()
+
+	// NOTE: No longer closing channel here, the provider handles that
+
+	if err != nil {
 		if err != context.Canceled && err != context.DeadlineExceeded {
 			// Use standard error wrapping for internal coordination errors
 			return errors.Wrap(err, errors.CodeInternal, "error occurred during concurrent instance processing")

@@ -146,6 +146,9 @@ func (p *Provider) ListResources(
 	filters map[string]string,
 	out chan<- domain.PlatformResource,
 ) error {
+	// The channel is now closed by the engine, not here
+	// No defer close(out) here anymore
+
 	g, childCtx := errgroup.WithContext(ctx)
 	foundHandler := false
 
@@ -199,7 +202,6 @@ func (p *Provider) ListResources(
 		return err
 	}
 
-	p.logger.Debugf(ctx, "All AWS resource handlers finished ListResources successfully.")
 	return nil
 }
 

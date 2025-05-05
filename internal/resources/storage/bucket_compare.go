@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/olusolaa/infra-drift-detector/pkg/compare"
-	"github.com/olusolaa/infra-drift-detector/pkg/convert"
 	"sort"
 
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/olusolaa/infra-drift-detector/internal/resources/helper"
+	localconvert "github.com/olusolaa/infra-drift-detector/internal/resources/helper/convert"
+	"github.com/olusolaa/infra-drift-detector/pkg/compare"
 )
 
 type BucketComparer struct {
@@ -112,13 +112,13 @@ func (c *BucketComparer) compareACLGransts(ctx context.Context, desired, actual 
 	var desiredSlice, actualSlice []map[string]any
 	var err error
 	if dExists && desired != nil {
-		desiredSlice, err = convert.ToSliceOfMap(desired)
+		desiredSlice, err = localconvert.ToSliceOfMap(desired)
 		if err != nil {
 			return false, "Invalid desired ACL slice type", err
 		}
 	}
 	if aExists && actual != nil {
-		actualSlice, err = convert.ToSliceOfMap(actual)
+		actualSlice, err = localconvert.ToSliceOfMap(actual)
 		if err != nil {
 			return false, "Invalid actual ACL slice type", err
 		}
@@ -198,8 +198,82 @@ func (c *BucketComparer) compareACLGransts(ctx context.Context, desired, actual 
 }
 
 func (c *BucketComparer) compareLifecycleRules(ctx context.Context, desired, actual any, dExists, aExists bool) (bool, string, error) {
-	// Use generic unordered map slice comparison helper
-	return helper.CompareSliceOfMapsUnordered(ctx, desired, actual, dExists, aExists, "id", "Lifecycle Rule")
+	// Normalize the lifecycle rules to account for Terraform structure vs AWS structure
+	normalizedDesired, err := normalizeLifecycleRules(desired)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to normalize desired lifecycle rules: %v", err), err
+	}
+
+	normalizedActual, err := normalizeLifecycleRules(actual)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to normalize actual lifecycle rules: %v", err), err
+	}
+
+	// Use generic unordered map slice comparison helper with normalized data
+	return helper.CompareSliceOfMapsUnordered(ctx, normalizedDesired, normalizedActual, dExists, aExists, "id", "Lifecycle Rule")
+}
+
+// normalizeLifecycleRules transforms lifecycle rules to a consistent format for comparison
+func normalizeLifecycleRules(input any) ([]map[string]any, error) {
+	if input == nil {
+		return nil, nil
+	}
+
+	// Convert to slice of maps
+	rulesSlice, err := localconvert.ToSliceOfMap(input)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]map[string]any, 0, len(rulesSlice))
+	for _, rule := range rulesSlice {
+		normalized := make(map[string]any)
+
+		// Copy the id and status directly
+		if id, exists := rule["id"]; exists {
+			normalized["id"] = id
+		}
+		if status, exists := rule["status"]; exists {
+			normalized["status"] = status
+		}
+
+		// Handle expiration - Terraform puts it in an array with a single map
+		if expiration, exists := rule["expiration"]; exists {
+			if expArr, ok := expiration.([]any); ok && len(expArr) > 0 {
+				if expMap, ok := expArr[0].(map[string]any); ok {
+					// Flatten the structure to match AWS API
+					normalized["expiration"] = map[string]any{
+						"days": expMap["days"],
+					}
+				}
+			} else if expMap, ok := expiration.(map[string]any); ok {
+				// Already in AWS format
+				normalized["expiration"] = expMap
+			}
+		}
+
+		// Handle filter - Terraform puts it in an array with a single map
+		if filter, exists := rule["filter"]; exists {
+			if filterArr, ok := filter.([]any); ok && len(filterArr) > 0 {
+				if filterMap, ok := filterArr[0].(map[string]any); ok {
+					// Flatten the structure to match AWS API
+					normalized["filter"] = map[string]any{
+						"prefix": filterMap["prefix"],
+					}
+				}
+			} else if filterMap, ok := filter.(map[string]any); ok {
+				// Already in AWS format
+				normalized["filter"] = filterMap
+			}
+		}
+
+		// Skip empty fields and nested arrays that AWS doesn't return
+		// These generally have empty values in Terraform but don't exist in AWS API responses
+
+		result = append(result, normalized)
+	}
+
+	return result, nil
 }
 
 func (c *BucketComparer) normalizeCorsRule(ctx context.Context, rule map[string]any) (map[string]any, error) {
@@ -211,7 +285,7 @@ func (c *BucketComparer) normalizeCorsRule(ctx context.Context, rule map[string]
 		switch k {
 		case "allowed_headers", "allowed_methods", "allowed_origins", "expose_headers":
 			// Convert to slice of strings and sort
-			strSlice, err := convert.ToSliceOfString(v)
+			strSlice, err := localconvert.ToSliceOfString(v)
 			if err != nil {
 				// If conversion fails, keep original value but maybe log? Or return error?
 				// Returning error might be too strict if API returns unexpected type. Let's keep original.
@@ -235,13 +309,13 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 	var desiredSlice, actualSlice []map[string]any
 	var err error
 	if dExists && desired != nil {
-		desiredSlice, err = convert.ToSliceOfMap(desired)
+		desiredSlice, err = localconvert.ToSliceOfMap(desired)
 		if err != nil {
 			return false, "Invalid desired CORS rules slice type", err
 		}
 	}
 	if aExists && actual != nil {
-		actualSlice, err = convert.ToSliceOfMap(actual)
+		actualSlice, err = localconvert.ToSliceOfMap(actual)
 		if err != nil {
 			return false, "Invalid actual CORS rules slice type", err
 		}
