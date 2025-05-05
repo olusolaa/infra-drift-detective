@@ -42,7 +42,7 @@ TERRAFORM_APPLIED=false
 # Function to decrypt credentials
 function decrypt_credentials {
     local password=""
-    echo -e "${YELLOW}Enter the password to decrypt AWS credentials:${RESET}"
+    echo -e "${YELLOW}Please ask the candidate for their password to decrypt temporary AWS credentials. Access is limited to one EC2 micro/mini instance and a small S3 bucket.${RESET}"
     read -s password
     
     # Decrypt the credentials with OpenSSL

@@ -192,9 +192,12 @@ Key sections: `settings`, `state`, `platform`, `resources`.
 # First, build the application
 go build -o drift-analyser ./cmd
 
+# Configure AWS credentials
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_DEFAULT_REGION="eu-west-1"
+
 # Apply Terraform to create resources
-
-
 cd examples
 terraform init
 terraform apply -auto-approve
@@ -206,7 +209,6 @@ cd ..
 # Using environment variables for AWS credentials
 AWS_ACCESS_KEY_ID="your-access-key" \
 AWS_SECRET_ACCESS_KEY="your-secret-key" \
-AWS_SESSION_TOKEN="your-session-token" \
 AWS_DEFAULT_REGION="eu-west-1" \
 ./drift-analyser -c ./config.yaml
 
