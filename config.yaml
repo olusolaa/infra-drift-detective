@@ -27,8 +27,8 @@ resources:
     attributes:
       - instance_type
       - tags
-      - state
   - kind: StorageBucket
     attributes:
       - tags
-      - lifecycle_rules
+      - versioning
+      - objects

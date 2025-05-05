@@ -166,13 +166,7 @@ graph TD
 ### 🛠️ Build from Source
 ```bash
 git clone https://github.com/olusolaa/infra-drift-detector.git
-cd infra-drift-detector
-go build -o drift-analyser ./cmd/driftanalyser
-```
-
-### 📦 Using `go install`
-```bash
-go install github.com/olusolaa/infra-drift-detector/cmd/driftanalyser@latest
+go build -o drift-analyser ./cmd
 ```
 
 ## ⚙️ Configuration
@@ -198,21 +192,29 @@ Key sections: `settings`, `state`, `platform`, `resources`.
 # First, build the application
 go build -o drift-analyser ./cmd
 
-# Basic usage with config file
-./drift-analyser -c ./examples/demo_config.yaml
+# Apply Terraform to create resources
+
+
+cd examples
+terraform init
+terraform apply -auto-approve
+cd ..
+
+# Run the drift detector
+./drift-analyser --config ./config.yaml
 
 # Using environment variables for AWS credentials
 AWS_ACCESS_KEY_ID="your-access-key" \
 AWS_SECRET_ACCESS_KEY="your-secret-key" \
 AWS_SESSION_TOKEN="your-session-token" \
 AWS_DEFAULT_REGION="eu-west-1" \
-./drift-analyser -c ./configs/config.yaml
+./drift-analyser -c ./config.yaml
 
 # Debug level logging
-./drift-analyser -c ./configs/config.yaml --log-level=debug
+./drift-analyser -c ./config.yaml --log-level=debug
 
 # Overriding specific attributes to check for specific resource kinds
-./drift-analyser -c ./configs/config.yaml --attributes "ComputeInstance=instance_type,tags;StorageBucket=tags,versioning"
+./drift-analyser -c ./config.yaml --attributes "ComputeInstance=instance_type,tags;StorageBucket=tags,versioning"
 ```
 
 ### 🧪 Running the Demo
