@@ -1,0 +1,34 @@
+settings:
+  log_level: info
+  log_format: text
+  concurrency: 10
+  colored_output: true
+
+state:
+  provider_type: tfstate
+  tfstate:
+    path: ./examples/terraform.tfstate
+
+platform:
+  provider: aws
+  aws:
+    region: "eu-west-1"  # Updated region to match AWS CLI config
+    profile: "default"
+    # Remove specific filters to allow detecting all resources
+
+matching:
+  # Use tag-based matching for reliable resource identification
+  strategy: tag
+  tag:
+    key: "TFResourceAddress"
+
+resources:
+  - kind: ComputeInstance
+    attributes:
+      - instance_type
+      - tags
+      - state
+  - kind: StorageBucket
+    attributes:
+      - tags
+      - lifecycle_rules

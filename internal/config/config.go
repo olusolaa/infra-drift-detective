@@ -11,57 +11,57 @@ import (
 )
 
 type Config struct {
-	Settings  SettingsConfig   `yaml:"settings" validate:"required"`
-	State     StateConfig      `yaml:"state" validate:"required"`
-	Platform  PlatformConfig   `yaml:"platform" validate:"required"`
-	Resources []ResourceConfig `yaml:"resources" validate:"required,min=1,dive"`
+	Settings  SettingsConfig   `yaml:"settings" mapstructure:"settings" validate:"required"`
+	State     StateConfig      `yaml:"state" mapstructure:"state" validate:"required"`
+	Platform  PlatformConfig   `yaml:"platform" mapstructure:"platform" validate:"required"`
+	Resources []ResourceConfig `yaml:"resources" mapstructure:"resources" validate:"required,min=1,dive"`
 }
 
 type SettingsConfig struct {
-	LogLevel     log.Level       `yaml:"log_level" validate:"required,oneof=debug info warn error"`
-	LogFormat    log.Format      `yaml:"log_format" validate:"required,oneof=text json"`
-	Concurrency  int             `yaml:"concurrency" validate:"required,min=1"`
-	MatcherType  string          `yaml:"matcher" validate:"required,oneof=tag"`
-	ReporterType string          `yaml:"reporter" validate:"required,oneof=text"`
-	Matcher      MatcherConfigs  `yaml:"matcher_config" validate:"required"`
-	Reporter     ReporterConfigs `yaml:"reporter_config"`
+	LogLevel     log.Level       `yaml:"log_level" mapstructure:"log_level" validate:"required,oneof=debug info warn error"`
+	LogFormat    log.Format      `yaml:"log_format" mapstructure:"log_format" validate:"required,oneof=text json"`
+	Concurrency  int             `yaml:"concurrency" mapstructure:"concurrency" validate:"required,min=1"`
+	MatcherType  string          `yaml:"matcher" mapstructure:"matcher" validate:"required,oneof=tag"`
+	ReporterType string          `yaml:"reporter" mapstructure:"reporter" validate:"required,oneof=text"`
+	Matcher      MatcherConfigs  `yaml:"matcher_config" mapstructure:"matcher_config" validate:"required"`
+	Reporter     ReporterConfigs `yaml:"reporter_config" mapstructure:"reporter_config"`
 }
 
 type StateConfig struct {
-	ProviderType string          `yaml:"provider_type" validate:"required,oneof=tfstate tfhcl"`
-	TFState      *tfstate.Config `yaml:"tfstate,omitempty" validate:"required_if=ProviderType tfstate"`
-	TFHCL        *tfhcl.Config   `yaml:"tfhcl,omitempty" validate:"required_if=ProviderType tfhcl"`
+	ProviderType string          `yaml:"provider_type" mapstructure:"provider_type" validate:"required,oneof=tfstate tfhcl"`
+	TFState      *tfstate.Config `yaml:"tfstate,omitempty" mapstructure:"tfstate,omitempty" validate:"required_if=ProviderType tfstate"`
+	TFHCL        *tfhcl.Config   `yaml:"tfhcl,omitempty" mapstructure:"tfhcl,omitempty" validate:"required_if=ProviderType tfhcl"`
 }
 
 type PlatformConfig struct {
-	AWS *AWSPlatformConfig `yaml:"aws,omitempty"`
+	AWS *AWSPlatformConfig `yaml:"aws,omitempty" mapstructure:"aws,omitempty"`
 }
 
 type AWSPlatformConfig struct {
-	APIRequestsPerSecond int    `yaml:"api_rps" validate:"omitempty,min=1,max=100"`
-	Region               string `yaml:"region" validate:"required"`
-	Profile              string `yaml:"profile" validate:"required"`
+	APIRequestsPerSecond int    `yaml:"api_rps" mapstructure:"api_rps" validate:"omitempty,min=1,max=100"`
+	Region               string `yaml:"region" mapstructure:"region" validate:"required"`
+	Profile              string `yaml:"profile" mapstructure:"profile" validate:"required"`
 }
 
 type ResourceConfig struct {
-	Kind            domain.ResourceKind `yaml:"kind" validate:"required"`
-	PlatformFilters map[string]string   `yaml:"platform_filters"`
-	Attributes      []string            `yaml:"attributes" validate:"required,min=1,dive,required"`
+	Kind            domain.ResourceKind `yaml:"kind" mapstructure:"kind" validate:"required"`
+	PlatformFilters map[string]string   `yaml:"platform_filters" mapstructure:"platform_filters"`
+	Attributes      []string            `yaml:"attributes" mapstructure:"attributes" validate:"required,min=1,dive,required"`
 }
 
 type MatcherConfigs struct {
-	Tag *tag.Config `yaml:"tag,omitempty" validate:"required_if=../MatcherType tag"`
+	Tag *tag.Config `yaml:"tag,omitempty" mapstructure:"tag,omitempty" validate:"required_if=../MatcherType tag"`
 }
 
 type ReporterConfigs struct {
-	Text *text.Config `yaml:"text,omitempty"`
-	JSON *json.Config `yaml:"json,omitempty"`
+	Text *text.Config `yaml:"text,omitempty" mapstructure:"text,omitempty"`
+	JSON *json.Config `yaml:"json,omitempty" mapstructure:"json,omitempty"`
 }
 
 type TFHCLConfig struct {
-	Directory string   `yaml:"directory" validate:"required,dir"`
-	VarFiles  []string `yaml:"var_files" validate:"omitempty,dive,file"`
-	Workspace string   `yaml:"workspace" validate:"required"`
+	Directory string   `yaml:"directory" mapstructure:"directory" validate:"required,dir"`
+	VarFiles  []string `yaml:"var_files" mapstructure:"var_files" validate:"omitempty,dive,file"`
+	Workspace string   `yaml:"workspace" mapstructure:"workspace" validate:"required"`
 }
 
 func DefaultConfig() *Config {
@@ -70,18 +70,19 @@ func DefaultConfig() *Config {
 			LogLevel:     log.LevelInfo,
 			LogFormat:    log.FormatText,
 			Concurrency:  10,
-			MatcherType:  tag.MatcherTypeTag,
-			ReporterType: text.ReporterTypeText,
+			MatcherType:  "tag",
+			ReporterType: "text",
 			Matcher: MatcherConfigs{
 				Tag: &tag.Config{TagKey: "TFResourceAddress"},
 			},
 			Reporter: ReporterConfigs{
 				Text: &text.Config{NoColor: false},
+				JSON: &json.Config{},
 			},
 		},
 		State: StateConfig{
 			ProviderType: tfstate.ProviderTypeTFState,
-			TFState:      &tfstate.Config{FilePath: "terraform.tfstate"},
+			TFState:      &tfstate.Config{FilePath: ""},
 			TFHCL:        &tfhcl.Config{Directory: ".", Workspace: "default"},
 		},
 		Platform: PlatformConfig{
