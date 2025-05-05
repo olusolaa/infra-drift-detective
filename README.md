@@ -16,11 +16,13 @@
 - [🖥️ Usage](#-usage)
   - [🔖 Flags](#-flags)
   - [💡 Example Execution](#-example-execution)
+  - [🧪 Running the Demo](#-running-the-demo)
 - [⚖️ Design Decisions & Trade-offs](#-design-decisions--trade-offs)
 - [🧪 Testing](#-testing)
 - [🌱 Future Improvements](#-future-improvements)
 - [🤝 Contributing](#-contributing)
 - [📝 License](#-license)
+- [🧪 Drift Detection in Action](#-drift-detection-in-action)
 
 ## 📖 Overview
 Infra-Drift-Detector is a command-line tool written in Go to detect configuration drift in cloud infrastructure. It compares the desired state defined in an Infrastructure-as-Code (IaC) source against the actual state observed on the cloud provider.
@@ -193,13 +195,135 @@ Key sections: `settings`, `state`, `platform`, `resources`.
 
 ### 💡 Example Execution
 ```bash
+# First, build the application
+go build -o drift-analyser ./cmd
+
+# Basic usage with config file
+./drift-analyser -c ./examples/demo_config.yaml
+
+# Using environment variables for AWS credentials
+AWS_ACCESS_KEY_ID="your-access-key" \
+AWS_SECRET_ACCESS_KEY="your-secret-key" \
+AWS_SESSION_TOKEN="your-session-token" \
+AWS_DEFAULT_REGION="eu-west-1" \
 ./drift-analyser -c ./configs/config.yaml
 
-export DRIFT_SETTINGS_LOG_LEVEL=debug
-./drift-analyser -c ./configs/config.yaml --attributes "ComputeInstance=instance_type,tags"
+# Debug level logging
+./drift-analyser -c ./configs/config.yaml --log-level=debug
 
-./drift-analyser
+# Overriding specific attributes to check for specific resource kinds
+./drift-analyser -c ./configs/config.yaml --attributes "ComputeInstance=instance_type,tags;StorageBucket=tags,versioning"
 ```
+
+### 🧪 Running the Demo
+
+For a guided experience with the drift detector, try our demo script:
+
+```bash
+# Navigate to examples directory
+cd examples
+
+# Run the demo script
+./demo_drift.sh
+```
+
+The demo script will:
+1. Set up example AWS resources
+2. Show you how to create intentional drift
+3. Run the drift detector to identify the drift
+4. Compare the results with Terraform's output
+
+## 🧪 Drift Detection in Action
+
+This guide demonstrates how to detect infrastructure drift - when your actual cloud resources differ from what's defined in your Infrastructure as Code.
+
+### Option 1: Live AWS Demo
+
+If you have AWS CLI configured, follow these steps:
+
+```bash
+# 1. Clone the repository and navigate to the examples directory
+cd examples
+
+# 2. Create infrastructure with Terraform
+terraform init
+terraform apply -auto-approve
+
+# 3. Build the application
+cd ..
+go build -o drift-analyser ./cmd
+
+# 4. Run initial drift detection (should show no significant drift)
+./drift-analyser --config config.yaml
+
+# 5. Create drift by modifying resources outside of Terraform
+# Example: Add a tag to EC2 instance (replace instance-id with yours from terraform output)
+aws ec2 create-tags --resources i-0123456789abcdef --tags Key=NewTag,Value=DriftDemo
+
+# 6. Detect the drift
+./drift-analyser --config config.yaml
+
+# 7. Try changing instance type (more significant drift)
+aws ec2 stop-instances --instance-ids i-0123456789abcdef
+aws ec2 wait instance-stopped --instance-ids i-0123456789abcdef
+aws ec2 modify-instance-attribute --instance-id i-0123456789abcdef --instance-type "{\"Value\": \"t2.small\"}"
+aws ec2 start-instances --instance-ids i-0123456789abcdef
+
+# 8. Detect more complex drift
+./drift-analyser --config config.yaml
+
+# 9. Restore resources to correct state
+cd examples
+terraform apply -auto-approve
+```
+
+### Option 2: Interactive Demo Script
+
+For a guided experience (with or without AWS access):
+
+```bash
+# Navigate to examples directory
+cd examples
+
+# Run the interactive demo script
+./demo_drift.sh
+```
+
+The script will:
+1. Guide you through creating infrastructure (if AWS access available)
+2. Provide menu options to introduce different types of drift
+3. Run the drift detector to identify changes
+4. Show detailed reports explaining what changed and why it matters
+
+### Understanding Drift Detection Results
+
+When you run the drift detector, the output will show:
+
+```
+Drift Analysis Report
+=====================
+Status   Kind             Identifier
+------   ----             ----------
+[DRIFT]  ComputeInstance  aws_instance.demo_instance
+  2 attributes differ:
+  [1] Attribute: instance_type (Values differ)
+    - Expected: "t2.micro"
+    + Actual:   "t2.small"
+  [2] Attribute: tags (NewTag: expected <missing>, actual 'DriftDemo')
+    Map Changes: NewTag: expected <missing>, actual "DriftDemo"
+```
+
+This tells you:
+- What resource has drifted (`aws_instance.demo_instance`)
+- Exactly which attributes changed (instance type and tags)
+- The expected vs. actual values for each change
+
+### Why Drift Detection Matters
+
+- **Security**: Unauthorized changes may introduce vulnerabilities
+- **Cost Control**: Resource modifications might increase cloud spending
+- **Reliability**: Unexpected changes can cause system failures
+- **Compliance**: Ensures infrastructure matches approved configurations
 
 ## ⚖️ Design Decisions & Trade-offs
 * Hexagonal architecture for extensibility
@@ -219,7 +343,7 @@ go test ./... -coverprofile=coverage.out && go tool cover -html=coverage.out
 ```
 
 ## 🌱 Future Improvements
-* More resource types (S3, RDS, …)
+* More resource types (RDS, …)
 * GCP & Azure providers
 * Pulumi and enhanced HCL sources
 * Explicit mapping matcher
@@ -233,4 +357,3 @@ Contributions welcome! Open an issue to discuss changes and ensure tests pass be
 
 ## 📝 License
 MIT License
-```

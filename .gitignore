@@ -26,10 +26,17 @@ vendor/
 
 # Build artifacts
 s3.test
+drift-analyser
 
 # Environment variables
 .env
 
 # Terraform
 .terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.*
 terraform.tfstate.backup
+*.tfplan
+tfplan
+demo_resources/
