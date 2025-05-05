@@ -11,8 +11,7 @@ import (
 	aws_errors "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/errors"
 
 	aws_limiter "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/limiter"
-	// Import shared aws interfaces from the 'shared' package
-	shared "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/shared"
+	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/shared"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
@@ -20,14 +19,13 @@ import (
 )
 
 type EC2Handler struct {
-	stsClient    shared.STSClientInterface // Use shared interface
-	accountID    string
-	accMu        sync.RWMutex
-	awsConfig    aws.Config
-	ec2Client    EC2ClientInterface  // Use specific interface
-	limiter      shared.RateLimiter  // Use shared interface
-	errorHandler shared.ErrorHandler // Use shared interface
-	// Paginator factory - keep for now, or abstract if needed later
+	stsClient        shared.STSClientInterface
+	accountID        string
+	accMu            sync.RWMutex
+	awsConfig        aws.Config
+	ec2Client        EC2ClientInterface
+	limiter          shared.RateLimiter
+	errorHandler     shared.ErrorHandler
 	paginatorFactory func(EC2ClientInterface, *ec2.DescribeInstancesInput) EC2InstancesPaginator
 }
 
@@ -73,17 +71,15 @@ func WithErrorHandler(handler shared.ErrorHandler) HandlerOption {
 // NewHandler creates a new EC2Handler with the given AWS config and optional configurations.
 func NewHandler(cfg aws.Config, opts ...HandlerOption) *EC2Handler {
 	h := &EC2Handler{
-		awsConfig: cfg, // Assign mandatory config
+		awsConfig: cfg,
 	}
 
-	// Set defaults
-	h.stsClient = sts.NewFromConfig(cfg)               // Default STS client
-	h.ec2Client = ec2.NewFromConfig(cfg)               // Default EC2 client
-	h.limiter = &aws_limiter.DefaultRateLimiter{}      // Default limiter
-	h.errorHandler = &aws_errors.DefaultErrorHandler{} // Default error handler
-	h.paginatorFactory = defaultPaginatorFactory       // Default paginator factory
+	h.stsClient = sts.NewFromConfig(cfg)
+	h.ec2Client = ec2.NewFromConfig(cfg)
+	h.limiter = &aws_limiter.DefaultRateLimiter{}
+	h.errorHandler = &aws_errors.DefaultErrorHandler{}
+	h.paginatorFactory = defaultPaginatorFactory
 
-	// Apply options, potentially overriding defaults
 	for _, opt := range opts {
 		opt(h)
 	}
@@ -91,7 +87,6 @@ func NewHandler(cfg aws.Config, opts ...HandlerOption) *EC2Handler {
 	return h
 }
 
-// defaultPaginatorFactory is the default implementation for creating DescribeInstancesPaginator.
 func defaultPaginatorFactory(client EC2ClientInterface, input *ec2.DescribeInstancesInput) EC2InstancesPaginator {
 	ec2Client, ok := client.(*ec2.Client)
 	if !ok {
@@ -133,7 +128,6 @@ func (h *EC2Handler) getAccountID(ctx context.Context, logger ports.Logger) (str
 		return "", h.errorHandler.Handle("STS", "GetCallerIdentity", err, ctx)
 	}
 	if output.Account == nil {
-		// Use standard error for internal logic issue
 		return "", errors.New(errors.CodePlatformAPIError, "EC2: AWS caller identity response did not contain Account ID")
 	}
 	h.accountID = aws.ToString(output.Account)
@@ -148,10 +142,10 @@ func (h *EC2Handler) ListResources(
 	logger ports.Logger,
 	out chan<- domain.PlatformResource,
 ) error {
-	client := h.ec2Client // Use the injected client
+	client := h.ec2Client
 	ec2Filters := BuildEC2Filters(filters)
 	input := &ec2.DescribeInstancesInput{Filters: ec2Filters}
-	paginator := h.paginatorFactory(client, input) // Use the paginator factory
+	paginator := h.paginatorFactory(client, input)
 	accountID, accErr := h.getAccountID(ctx, logger)
 	if accErr != nil {
 		logger.Warnf(ctx, "Proceeding without AWS Account ID for EC2 ListResources: %v", accErr)
@@ -180,7 +174,6 @@ func (h *EC2Handler) ListResources(
 		}
 		output, err := paginator.NextPage(childCtx)
 		if err != nil {
-			// Use injected error handler
 			return h.errorHandler.Handle("EC2", fmt.Sprintf("DescribeInstances:Page%d", currentPageNum), err, childCtx)
 		}
 		pageNum = currentPageNum
@@ -195,17 +188,16 @@ func (h *EC2Handler) ListResources(
 					case <-childCtx.Done():
 						return childCtx.Err()
 					default:
-						// Note: newEc2InstanceResource now takes the EC2ClientInterface directly
 						resource, mapErr := newEc2InstanceResource(
 							instance,
-							cfg.Region, // Region from config passed to ListResources
+							cfg.Region,
 							accountID,
 							logger,
-							client, // Pass the client interface only ONCE
+							client,
 						)
 						if mapErr != nil {
 							logger.Errorf(childCtx, mapErr, "Failed to create resource wrapper for instance %s, skipping", aws.ToString(instance.InstanceId))
-							return nil // Continue processing other instances
+							return nil
 						}
 
 						select {
@@ -221,17 +213,13 @@ func (h *EC2Handler) ListResources(
 		}
 	}
 
-	// Now wait for all goroutines to finish
 	err := g.Wait()
-
-	// NOTE: No longer closing channel here, the provider handles that
 
 	if err != nil {
 		if err != context.Canceled && err != context.DeadlineExceeded {
-			// Use standard error wrapping for internal coordination errors
 			return errors.Wrap(err, errors.CodeInternal, "error occurred during concurrent instance processing")
 		}
-		return err // Return context errors directly
+		return err
 	}
 
 	logger.Debugf(ctx, "Finished EC2 pagination and processing.")
@@ -239,7 +227,7 @@ func (h *EC2Handler) ListResources(
 }
 
 func (h *EC2Handler) GetResource(ctx context.Context, cfg aws.Config, id string, logger ports.Logger) (domain.PlatformResource, error) {
-	client := h.ec2Client // Use injected client
+	client := h.ec2Client
 	input := &ec2.DescribeInstancesInput{InstanceIds: []string{id}}
 
 	logger.Debugf(ctx, "Describing single instance %s", id)
@@ -254,7 +242,6 @@ func (h *EC2Handler) GetResource(ctx context.Context, cfg aws.Config, id string,
 	}
 
 	if len(output.Reservations) == 0 || len(output.Reservations[0].Instances) == 0 {
-		// Use standard error for not found
 		return nil, errors.New(errors.CodeResourceNotFound, fmt.Sprintf("EC2 instance with ID '%s' not found (empty response)", id))
 	}
 	instance := output.Reservations[0].Instances[0]
@@ -265,16 +252,14 @@ func (h *EC2Handler) GetResource(ctx context.Context, cfg aws.Config, id string,
 		// Don't fail here, allow resource building without account ID if possible
 	}
 
-	// Note: newEc2InstanceResource now takes the EC2ClientInterface directly
 	resource, mapErr := newEc2InstanceResource(
 		instance,
-		cfg.Region, // Region from config passed to GetResource
+		cfg.Region,
 		accountID,
 		logger,
-		client, // Pass the client interface only ONCE
+		client,
 	)
 	if mapErr != nil {
-		// Use standard error wrapping for internal mapping errors
 		return nil, errors.Wrap(mapErr, errors.CodeInternal, fmt.Sprintf("failed to create resource wrapper for instance %s", id))
 	}
 

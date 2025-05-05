@@ -21,7 +21,4 @@ type EC2InstancesPaginator interface {
 	NextPage(ctx context.Context, optFns ...func(*ec2.Options)) (*ec2.DescribeInstancesOutput, error)
 }
 
-// These types are aliased for potential use in mocks or tests if direct struct matching is needed.
-// type DescribeInstanceAttributeInput = ec2.DescribeInstanceAttributeInput
-// type DescribeVolumesInput = ec2.DescribeVolumesInput
 type Instance = ec2types.Instance // Alias ec2types.Instance for easier use

@@ -1,5 +1,3 @@
-// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/parser.go ---
-
 package evaluator
 
 import (
@@ -11,7 +9,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
-	"github.com/hashicorp/hcl/v2/hclsyntax" // Import for Body cast
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/mapping"
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
@@ -57,12 +55,11 @@ func parseHCLFiles(ctx context.Context, parser *hclparse.Parser, dirPath string,
 		if file != nil {
 			files[filePath] = file
 		} else if !DiagsHasFatalErrors(diags) {
-			// Use a valid range for the subject, like the start of the file
 			subjectRange := hcl.Range{Filename: filePath, Start: hcl.Pos{Line: 1, Column: 1}, End: hcl.Pos{Line: 1, Column: 1}}
 			allDiags = allDiags.Append(&hcl.Diagnostic{
 				Severity: hcl.DiagError, Summary: "Internal HCL parsing error",
 				Detail:  "Parser returned nil file without fatal diagnostics.",
-				Subject: &subjectRange, // Use a default range
+				Subject: &subjectRange,
 			})
 			fileLogger.Errorf(ctx, nil, "Internal HCL parsing error: nil file without fatal diagnostics")
 		} else {
@@ -78,7 +75,6 @@ func parseHCLFiles(ctx context.Context, parser *hclparse.Parser, dirPath string,
 	return files, allDiags, nil
 }
 
-// FindResourceBlocksOfType iterates through syntax blocks directly.
 func FindResourceBlocksOfType(hclFiles map[string]*hcl.File, requestedKind domain.ResourceKind) ([]*hcl.Block, hcl.Diagnostics) {
 	var blocks []*hcl.Block
 	var diags hcl.Diagnostics
@@ -114,7 +110,6 @@ func FindResourceBlocksOfType(hclFiles map[string]*hcl.File, requestedKind domai
 	return blocks, diags
 }
 
-// FindSpecificResourceBlock iterates through syntax blocks directly.
 func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string) (*hcl.Block, hcl.Diagnostics) {
 	var foundBlock *hcl.Block
 	var firstPath string
@@ -133,7 +128,6 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 		}
 		syntaxBody, ok := file.Body.(*hclsyntax.Body)
 		if !ok {
-			// Corrected: Call method, store result, take address
 			missingRange := file.Body.MissingItemRange()
 			diags = append(diags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal Error", Detail: "Could not cast file body to syntax body.", Subject: &missingRange})
 			continue
@@ -144,7 +138,7 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 				if block.Labels[0] == expectedType && block.Labels[1] == expectedName {
 					hclBlock := syntaxBlockToHclBlock(block, file.Body)
 					if hclBlock == nil {
-						blockTypeRange := block.TypeRange // Get range from syntax block
+						blockTypeRange := block.TypeRange
 						diags = append(diags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal Error", Detail: fmt.Sprintf("Could not convert found syntax block %s back to hcl.Block", block.Type), Subject: &blockTypeRange})
 						continue
 					}
@@ -171,5 +165,3 @@ func FindSpecificResourceBlock(hclFiles map[string]*hcl.File, identifier string)
 func isValidHCLFileName(name string) bool {
 	return strings.HasSuffix(name, ".tf") || strings.HasSuffix(name, ".tf.json")
 }
-
-// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/parser.go ---

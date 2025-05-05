@@ -209,7 +209,6 @@ func (c *BucketComparer) compareLifecycleRules(ctx context.Context, desired, act
 		return false, fmt.Sprintf("Failed to normalize actual lifecycle rules: %v", err), err
 	}
 
-	// Use generic unordered map slice comparison helper with normalized data
 	return helper.CompareSliceOfMapsUnordered(ctx, normalizedDesired, normalizedActual, dExists, aExists, "id", "Lifecycle Rule")
 }
 
@@ -219,7 +218,6 @@ func normalizeLifecycleRules(input any) ([]map[string]any, error) {
 		return nil, nil
 	}
 
-	// Convert to slice of maps
 	rulesSlice, err := localconvert.ToSliceOfMap(input)
 	if err != nil {
 		return nil, err
@@ -229,7 +227,6 @@ func normalizeLifecycleRules(input any) ([]map[string]any, error) {
 	for _, rule := range rulesSlice {
 		normalized := make(map[string]any)
 
-		// Copy the id and status directly
 		if id, exists := rule["id"]; exists {
 			normalized["id"] = id
 		}
@@ -237,11 +234,9 @@ func normalizeLifecycleRules(input any) ([]map[string]any, error) {
 			normalized["status"] = status
 		}
 
-		// Handle expiration - Terraform puts it in an array with a single map
 		if expiration, exists := rule["expiration"]; exists {
 			if expArr, ok := expiration.([]any); ok && len(expArr) > 0 {
 				if expMap, ok := expArr[0].(map[string]any); ok {
-					// Flatten the structure to match AWS API
 					normalized["expiration"] = map[string]any{
 						"days": expMap["days"],
 					}
@@ -252,11 +247,9 @@ func normalizeLifecycleRules(input any) ([]map[string]any, error) {
 			}
 		}
 
-		// Handle filter - Terraform puts it in an array with a single map
 		if filter, exists := rule["filter"]; exists {
 			if filterArr, ok := filter.([]any); ok && len(filterArr) > 0 {
 				if filterMap, ok := filterArr[0].(map[string]any); ok {
-					// Flatten the structure to match AWS API
 					normalized["filter"] = map[string]any{
 						"prefix": filterMap["prefix"],
 					}
@@ -266,9 +259,6 @@ func normalizeLifecycleRules(input any) ([]map[string]any, error) {
 				normalized["filter"] = filterMap
 			}
 		}
-
-		// Skip empty fields and nested arrays that AWS doesn't return
-		// These generally have empty values in Terraform but don't exist in AWS API responses
 
 		result = append(result, normalized)
 	}
@@ -284,15 +274,12 @@ func (c *BucketComparer) normalizeCorsRule(ctx context.Context, rule map[string]
 		}
 		switch k {
 		case "allowed_headers", "allowed_methods", "allowed_origins", "expose_headers":
-			// Convert to slice of strings and sort
 			strSlice, err := localconvert.ToSliceOfString(v)
 			if err != nil {
-				// If conversion fails, keep original value but maybe log? Or return error?
-				// Returning error might be too strict if API returns unexpected type. Let's keep original.
 				normalized[k] = v
 			} else {
 				sort.Strings(strSlice)
-				normalized[k] = strSlice // Store the sorted string slice
+				normalized[k] = strSlice
 			}
 		default:
 			normalized[k] = v
@@ -325,7 +312,6 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 		return true, "", nil
 	}
 
-	// Normalize and serialize each rule to create a comparable representation
 	normalizeAndSerialize := func(rules []map[string]any) (map[string]map[string]any, error) {
 		serializedMap := make(map[string]map[string]any)
 		for _, rule := range rules {
@@ -338,7 +324,7 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 			}
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
-			} // Check after normalization
+			}
 
 			jsonBytes, jsonErr := json.Marshal(normalizedRule)
 			if jsonErr != nil {
@@ -359,7 +345,7 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 	}
 	if ctx.Err() != nil {
 		return false, "", ctx.Err()
-	} // Check context
+	}
 
 	actualRuleSet, aErr := normalizeAndSerialize(actualSlice)
 	if aErr != nil {
@@ -367,9 +353,8 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 	}
 	if ctx.Err() != nil {
 		return false, "", ctx.Err()
-	} // Check context
+	}
 
-	// Compare the sets of serialized rules
 	if len(desiredRuleSet) != len(actualRuleSet) {
 		return false, fmt.Sprintf("Number of unique CORS rules differ (desired: %d, actual: %d)", len(desiredRuleSet), len(actualRuleSet)), nil
 	}
@@ -380,7 +365,7 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 		}
 		if _, exists := actualRuleSet[key]; !exists {
 			var ruleContent map[string]any
-			_ = json.Unmarshal([]byte(key), &ruleContent) // Best effort to show content
+			_ = json.Unmarshal([]byte(key), &ruleContent)
 			return false, fmt.Sprintf("CORS rule content mismatch (rule %v present in desired, missing in actual)", ruleContent), nil
 		}
 	}
@@ -389,7 +374,6 @@ func (c *BucketComparer) compareCorsRules(ctx context.Context, desired, actual a
 }
 
 func (c *BucketComparer) comparePolicy(ctx context.Context, desired, actual any, dExists, aExists bool) (bool, string, error) {
-	// Use generic JSON string comparison helper
 	return helper.CompareJSONStrings(ctx, desired, actual, dExists, aExists, "Policy")
 }
 
@@ -421,7 +405,6 @@ func (c *BucketComparer) compareSimpleBlockMap(blockName string) helper.Attribut
 			return false, fmt.Sprintf("%s configuration mismatch (actual is nil)", blockName), nil
 		}
 
-		// Use internal diff generator which respects context
 		details := compare.GenerateDetailedMapDiff(ctx, dMap, aMap)
 		if ctx.Err() != nil {
 			return false, "", ctx.Err()
@@ -433,7 +416,6 @@ func (c *BucketComparer) compareSimpleBlockMap(blockName string) helper.Attribut
 }
 
 func (c *BucketComparer) compareEncryption(ctx context.Context, desired, actual any, dExists, aExists bool) (bool, string, error) {
-	// Extracts the effective encryption rule map from potentially nested structures
 	extractRule := func(input any) (map[string]any, bool) {
 		if input == nil {
 			return nil, true
@@ -452,8 +434,8 @@ func (c *BucketComparer) compareEncryption(ctx context.Context, desired, actual 
 			_, hasBke := outerMap["bucket_key_enabled"]
 			if hasApply || hasBke {
 				return outerMap, true
-			} // Assume input is the rule map itself
-			return nil, true // No recognizable rule structure found
+			}
+			return nil, true
 		}
 
 		rulesSlice, ok := rulesAny.([]any)
@@ -475,7 +457,6 @@ func (c *BucketComparer) compareEncryption(ctx context.Context, desired, actual 
 		return helper.DefaultAttributeCompare(ctx, desired, actual, dExists, aExists)
 	}
 
-	// Now compare the extracted rule maps
 	if !dExists && !aExists {
 		return true, "", nil
 	}
@@ -493,7 +474,6 @@ func (c *BucketComparer) compareEncryption(ctx context.Context, desired, actual 
 		return false, "Encryption configuration exists only in one state", nil
 	}
 
-	// Both exist and are extracted, compare the rule maps using internal diff
 	details := compare.GenerateDetailedMapDiff(ctx, desiredRule, actualRule)
 	if ctx.Err() != nil {
 		return false, "", ctx.Err()

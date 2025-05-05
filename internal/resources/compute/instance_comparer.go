@@ -48,7 +48,6 @@ func (c *InstanceComparer) Compare(
 	diffs := make([]domain.AttributeDiff, 0)
 
 	for _, attrKey := range attributesToCheck {
-		// Check context at the beginning of each attribute comparison
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -66,7 +65,6 @@ func (c *InstanceComparer) Compare(
 			isEqual, details, compareErr = helper.DefaultAttributeCompare(ctx, desiredVal, actualVal, dExists, aExists)
 		}
 
-		// Check context again after potentially long comparison function
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -109,7 +107,6 @@ func (c *InstanceComparer) compareRootBlockDevice(ctx context.Context, desired, 
 		return false, "Root block device exists only in desired state", nil
 	}
 
-	// Assume values are already normalized map[string]any during mapping phase
 	normDesired, dOk := desired.(map[string]any)
 	normActual, aOk := actual.(map[string]any)
 
@@ -127,7 +124,6 @@ func (c *InstanceComparer) compareRootBlockDevice(ctx context.Context, desired, 
 		return false, "Root block device configuration mismatch (actual is nil)", nil
 	}
 
-	// Use internal diff generator which respects context
 	details := compare.GenerateDetailedMapDiff(ctx, normDesired, normActual)
 	if ctx.Err() != nil {
 		return false, "", ctx.Err()
@@ -138,6 +134,5 @@ func (c *InstanceComparer) compareRootBlockDevice(ctx context.Context, desired, 
 }
 
 func (c *InstanceComparer) compareEBSBlockDevices(ctx context.Context, desired, actual any, dExists, aExists bool) (bool, string, error) {
-	// Use generic unordered map slice comparison helper
 	return helper.CompareSliceOfMapsUnordered(ctx, desired, actual, dExists, aExists, "device_name", "EBS Block Device")
 }

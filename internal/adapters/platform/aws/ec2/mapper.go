@@ -20,24 +20,22 @@ import (
 )
 
 type ec2InstanceResource struct {
-	mu          sync.RWMutex
-	meta        domain.ResourceMetadata
-	rawInstance Instance // Use aliased type
-	logger      ports.Logger
-	// Store the single client interface
+	mu              sync.RWMutex
+	meta            domain.ResourceMetadata
+	rawInstance     Instance
+	logger          ports.Logger
 	ec2Client       EC2ClientInterface
 	builtAttrs      map[string]any
 	fetchErr        error
 	attributesBuilt bool
 }
 
-// Update function signature to use EC2ClientInterface
 func newEc2InstanceResource(
 	instance Instance,
 	region string,
 	accountID string,
 	logger ports.Logger,
-	client EC2ClientInterface, // Accept single client interface
+	client EC2ClientInterface,
 ) (domain.PlatformResource, error) {
 
 	meta := domain.ResourceMetadata{
@@ -57,7 +55,7 @@ func newEc2InstanceResource(
 		meta:        meta,
 		rawInstance: instance,
 		logger:      logger.WithFields(map[string]any{"instance_id": meta.ProviderAssignedID}),
-		ec2Client:   client, // Store the single client
+		ec2Client:   client,
 	}, nil
 }
 
@@ -69,29 +67,23 @@ func (r *ec2InstanceResource) Metadata() domain.ResourceMetadata {
 
 func (r *ec2InstanceResource) Attributes(ctx context.Context) (map[string]any, error) {
 	r.mu.RLock()
-	// Check if attributes are already built while holding read lock
 	if r.attributesBuilt {
 		builtAttrsCopy := r.copyAttributeMap(r.builtAttrs)
 		fetchErr := r.fetchErr
 		r.mu.RUnlock()
 		return builtAttrsCopy, fetchErr
 	}
-	// Read necessary data BEFORE releasing the read lock
 	bdms := r.rawInstance.BlockDeviceMappings
-	r.mu.RUnlock() // Release read lock
+	r.mu.RUnlock()
 
-	// Acquire write lock ONLY if attributes were not built
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double-check if another goroutine built attributes while waiting for the write lock
 	if r.attributesBuilt {
 		return r.copyAttributeMap(r.builtAttrs), r.fetchErr
 	}
 
-	// Perform the attribute fetching and building
 	r.builtAttrs = mapInstanceToAttributes(r.rawInstance, r.logger)
-	// Pass the pre-read block device mappings
 	r.fetchErr = r.fetchAndMapAdditionalAttributes(ctx, bdms)
 	r.attributesBuilt = true
 
@@ -109,8 +101,6 @@ func (r *ec2InstanceResource) copyAttributeMap(src map[string]any) map[string]an
 	return dst
 }
 
-// fetchAndMapAdditionalAttributes fetches attributes requiring separate API calls
-// It now accepts block device mappings as an argument.
 func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Context, instanceBDMs []ec2types.InstanceBlockDeviceMapping) error {
 	if r.ec2Client == nil {
 		return iddErrors.New(iddErrors.CodeInternal, "EC2 client not available for fetching additional attributes")
@@ -121,7 +111,6 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 	var fetchErrors []error
 	var errMu sync.Mutex
 
-	// Local variables to store results from goroutines
 	var fetchedUserData string
 	var userDataFetched bool
 	var fetchedVolumes map[string]ec2types.Volume
@@ -133,9 +122,8 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 		errMu.Unlock()
 	}
 
-	wg.Add(2) // For UserData and EBS details
+	wg.Add(2)
 
-	// Fetch User Data
 	go func() {
 		defer wg.Done()
 		if err := aws_limiter.Wait(ctx, r.logger); err != nil {
@@ -161,17 +149,14 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 				addError(wrappedErr)
 				return
 			}
-			// Store result locally instead of updating shared map
 			fetchedUserData = string(decoded)
 			userDataFetched = true
 		}
 	}()
 
-	// Fetch EBS Volume Details
 	go func() {
 		defer wg.Done()
 		volumeIDs := make([]string, 0)
-		// Use the passed-in instanceBDMs instead of acquiring RLock
 		for _, bdm := range instanceBDMs {
 			if bdm.Ebs != nil && bdm.Ebs.VolumeId != nil {
 				volumeIDs = append(volumeIDs, *bdm.Ebs.VolumeId)
@@ -196,7 +181,6 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 		}
 
 		if output != nil && len(output.Volumes) > 0 {
-			// Store results locally instead of updating shared map
 			fetchedVolumes = make(map[string]ec2types.Volume)
 			for _, vol := range output.Volumes {
 				fetchedVolumes[aws.ToString(vol.VolumeId)] = vol
@@ -207,19 +191,14 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 
 	wg.Wait()
 
-	// --- Update the shared map AFTER goroutines finish ---
-	// This code runs under the write lock acquired by the calling Attributes() method.
-
 	if userDataFetched {
 		r.builtAttrs["user_data"] = fetchedUserData
 	}
 
 	if volumesFetched {
 		if bdmList, ok := r.builtAttrs["block_device_mappings"].([]map[string]any); ok {
-			// Create a new slice to avoid modifying the original slice in place while iterating
 			newBdmList := make([]map[string]any, len(bdmList))
 			for i, bdm := range bdmList {
-				// Create a copy of the inner map to avoid modifying it in place
 				newBdm := make(map[string]any)
 				for k, v := range bdm {
 					newBdm[k] = v
@@ -227,14 +206,13 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 
 				if ebsMapUntyped, ebsOk := newBdm["ebs"]; ebsOk {
 					if ebsMap, ebsMapOk := ebsMapUntyped.(map[string]any); ebsMapOk {
-						// Create a copy of the ebsMap
 						newEbsMap := make(map[string]any)
 						for k, v := range ebsMap {
 							newEbsMap[k] = v
 						}
 
 						if volID, idOk := newEbsMap["volume_id"].(string); idOk {
-							if volDetails, volOk := fetchedVolumes[volID]; volOk { // Use locally fetched volumes
+							if volDetails, volOk := fetchedVolumes[volID]; volOk {
 								newEbsMap["size"] = volDetails.Size
 								newEbsMap["iops"] = volDetails.Iops
 								newEbsMap["throughput"] = volDetails.Throughput
@@ -242,27 +220,23 @@ func (r *ec2InstanceResource) fetchAndMapAdditionalAttributes(ctx context.Contex
 								newEbsMap["kms_key_id"] = volDetails.KmsKeyId
 							}
 						}
-						newBdm["ebs"] = newEbsMap // Update the copied bdm map with the copied ebs map
+						newBdm["ebs"] = newEbsMap
 					}
 				}
-				newBdmList[i] = newBdm // Place the updated copy into the new list
+				newBdmList[i] = newBdm
 			}
-			r.builtAttrs["block_device_mappings"] = newBdmList // Replace the old list with the new one
+			r.builtAttrs["block_device_mappings"] = newBdmList
 		}
 	}
 
-	// Combine errors if any occurred
 	if len(fetchErrors) > 0 {
-		// Use standard errors.Join (Go 1.20+)
 		combinedErr := errors.Join(fetchErrors...)
-		// Wrap the combined error using the aliased custom error package
 		return iddErrors.Wrap(combinedErr, iddErrors.CodePlatformAPIError, fmt.Sprintf("failed to fetch all attributes for instance %s", r.meta.ProviderAssignedID))
 	}
 
 	return nil
 }
 
-// mapInstanceToAttributes performs the initial mapping from the raw EC2 instance struct
 func mapInstanceToAttributes(instance Instance, logger ports.Logger) map[string]any {
 	attrs := map[string]any{}
 
@@ -372,12 +346,11 @@ func mapInstanceToAttributes(instance Instance, logger ports.Logger) map[string]
 					"status":                string(bdm.Ebs.Status),
 					"attach_time":           aws.ToTime(bdm.Ebs.AttachTime).UTC().Format(time.RFC3339),
 					"delete_on_termination": aws.ToBool(bdm.Ebs.DeleteOnTermination),
-					// Add placeholders for details fetched later
-					"size":       nil,
-					"iops":       nil,
-					"throughput": nil,
-					"encrypted":  nil,
-					"kms_key_id": nil,
+					"size":                  nil,
+					"iops":                  nil,
+					"throughput":            nil,
+					"encrypted":             nil,
+					"kms_key_id":            nil,
 				}
 				bdmMap["ebs"] = ebsMap
 			}
@@ -396,7 +369,6 @@ func mapInstanceToAttributes(instance Instance, logger ports.Logger) map[string]
 			attrs[domain.KeyName] = name
 		}
 	}
-	// Ensure KeyName exists, default to ID if no Name tag
 	if _, ok := attrs[domain.KeyName]; !ok {
 		attrs[domain.KeyName] = attrs[domain.KeyID]
 	}

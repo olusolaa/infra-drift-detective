@@ -1,5 +1,3 @@
-// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/provider.go ---
-
 package tfhcl
 
 import (

@@ -1,4 +1,3 @@
-// internal/adapters/platform/aws/provider.go
 package aws
 
 import (

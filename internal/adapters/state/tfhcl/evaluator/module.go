@@ -1,5 +1,3 @@
-// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/module.go ---
-
 package evaluator
 
 import (
@@ -9,7 +7,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclparse"
-	"github.com/hashicorp/hcl/v2/hclsyntax" // Use syntax types more
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 	apperrors "github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/zclconf/go-cty/cty"
@@ -20,8 +18,8 @@ type Module struct {
 	path        string
 	workspace   string
 	inputVars   map[string]cty.Value
-	variables   map[string]*VariableDefinition // Stores decoded definitions
-	locals      map[string]cty.Value           // Stores evaluated locals
+	variables   map[string]*VariableDefinition
+	locals      map[string]cty.Value
 	evalContext *hcl.EvalContext
 	initDiags   hcl.Diagnostics
 	evalMutex   sync.RWMutex
@@ -74,7 +72,6 @@ func LoadModule(
 		variables: make(map[string]*VariableDefinition),
 	}
 
-	// --- Step 1: Decode VARIABLE definitions using syntaxBody iteration ---
 	logger.Debugf(ctx, "Decoding variable definitions...")
 	var varDefDiags hcl.Diagnostics
 	definedVars := make(map[string]string)
@@ -87,12 +84,11 @@ func LoadModule(
 			continue
 		}
 
-		for _, block := range syntaxBody.Blocks { // Iterate syntax blocks
+		for _, block := range syntaxBody.Blocks {
 			if block.Type != "variable" {
 				continue
 			}
 
-			// Convert syntax block back to hcl.Block first
 			hclBlock := syntaxBlockToHclBlock(block, file.Body)
 			if hclBlock == nil {
 				varDefDiags = append(varDefDiags, &hcl.Diagnostic{Severity: hcl.DiagWarning, Summary: "Internal error", Detail: "Could not convert syntax variable block back to hcl.Block", Subject: &block.TypeRange}) // Use TypeRange for subject
@@ -100,20 +96,19 @@ func LoadModule(
 			}
 
 			if len(hclBlock.Labels) != 1 {
-				defRange := hclBlock.DefRange // Get range from hcl.Block
+				defRange := hclBlock.DefRange
 				varDefDiags = append(varDefDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Invalid variable block", Detail: "Variable block requires exactly one label (the name).", Subject: &defRange})
 				continue
 			}
 			varName := hclBlock.Labels[0]
-			blockDefRange := hclBlock.DefRange // Store range before potential modification
+			blockDefRange := hclBlock.DefRange
 			if prevPath, exists := definedVars[varName]; exists {
 				varDefDiags = append(varDefDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate variable definition", Detail: "Variable " + varName + " was already defined at " + prevPath, Subject: &blockDefRange}) // Use stored range
 				continue
 			}
-			// Corrected: Call Range() method then String()
 			definedVars[varName] = blockDefRange.String()
 
-			def, decodeDiags := decodeVariableBlock(hclBlock) // Use the hcl.Block
+			def, decodeDiags := decodeVariableBlock(hclBlock)
 			varDefDiags = append(varDefDiags, decodeDiags...)
 			if def != nil && !DiagsHasFatalErrors(decodeDiags) {
 				mod.variables[varName] = def
@@ -126,7 +121,6 @@ func LoadModule(
 	}
 	logger.Debugf(ctx, "Decoded %d variable definitions", len(mod.variables))
 
-	// --- Step 2: Load tfvars and MERGE with defaults ---
 	var mergeDiags hcl.Diagnostics
 	mod.inputVars, mergeDiags = mergeVariablesAndDefaults(ctx, parser, mod.variables, varFilePaths, logger) // Pass decoded definitions
 	mod.initDiags = append(mod.initDiags, mergeDiags...)
@@ -138,7 +132,6 @@ func LoadModule(
 		return files, mod, err
 	}
 
-	// --- Step 3: Build initial context ---
 	mod.initDiags = append(mod.initDiags, mod.buildInitialContext(ctx)...)
 	if DiagsHasFatalErrors(mod.initDiags) {
 		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "building initial context", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors building initial context")
@@ -147,10 +140,9 @@ func LoadModule(
 		return files, mod, err
 	}
 
-	// --- Step 4: Evaluate LOCALS ---
 	logger.Debugf(ctx, "Evaluating locals blocks...")
 	var localsDiags hcl.Diagnostics
-	definedLocals := make(map[string]string) // Use string range for key
+	definedLocals := make(map[string]string)
 	evaluatedLocals := make(map[string]cty.Value)
 
 	for _, file := range files {
@@ -162,7 +154,7 @@ func LoadModule(
 			continue
 		}
 
-		for _, block := range syntaxBody.Blocks { // Iterate syntax blocks
+		for _, block := range syntaxBody.Blocks {
 			if block.Type != "locals" {
 				continue
 			}
@@ -170,16 +162,15 @@ func LoadModule(
 				return files, mod, err
 			}
 
-			for name, attr := range block.Body.Attributes { // Use syntax attributes
+			for name, attr := range block.Body.Attributes {
 				if err := ctx.Err(); err != nil {
 					return files, mod, err
 				}
-				attrNameRange := attr.NameRange // Store range before potential modification
+				attrNameRange := attr.NameRange
 				if definedAtStr, exists := definedLocals[name]; exists {
 					localsDiags = append(localsDiags, &hcl.Diagnostic{Severity: hcl.DiagError, Summary: "Duplicate local value definition", Detail: "Local value " + name + " was already defined at " + definedAtStr, Subject: &attrNameRange}) // Use stored range
 					continue
 				}
-				// Corrected: Use attr.Range which is hcl.Range field, not Range() method
 				definedLocals[name] = ""
 
 				val, valDiags := attr.Expr.Value(mod.evalContext)
@@ -195,7 +186,6 @@ func LoadModule(
 		return files, mod, apperrors.Wrap(&HCLDiagnosticsError{Operation: "evaluating locals", FilePath: dirPath, Diags: mod.initDiags}, apperrors.CodeStateParseError, "fatal errors evaluating locals")
 	}
 
-	// Update context with evaluated locals
 	if len(evaluatedLocals) > 0 {
 		mod.evalMutex.Lock()
 		mod.locals = evaluatedLocals
@@ -223,7 +213,6 @@ func LoadModule(
 	return files, mod, nil
 }
 
-// EvalContext remains the same
 func (m *Module) EvalContext() *hcl.EvalContext {
 	m.evalMutex.RLock()
 	defer m.evalMutex.RUnlock()
@@ -237,7 +226,6 @@ func (m *Module) EvalContext() *hcl.EvalContext {
 	return &hcl.EvalContext{Variables: copiedVars, Functions: m.evalContext.Functions}
 }
 
-// mergeVariablesAndDefaults remains the same
 func mergeVariablesAndDefaults(ctx context.Context, parser *hclparse.Parser, definitions map[string]*VariableDefinition, varFilePaths []string, logger ports.Logger) (map[string]cty.Value, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
 	finalVars := make(map[string]cty.Value)
@@ -298,11 +286,9 @@ func mergeVariablesAndDefaults(ctx context.Context, parser *hclparse.Parser, def
 		targetType := def.Type
 
 		if val, ok := loadedTfVars[name]; ok {
-			// Use definition range for conversion diagnostic subject
 			finalVal, convDiags = convertVarType(val, targetType, def.DeclRange)
 			diags = append(diags, convDiags...)
 		} else if !def.Default.IsNull() && def.Default.IsKnown() {
-			// Use definition range for conversion diagnostic subject
 			finalVal, convDiags = convertVarType(def.Default, targetType, def.DeclRange)
 			diags = append(diags, convDiags...)
 		} else {
@@ -318,7 +304,6 @@ func mergeVariablesAndDefaults(ctx context.Context, parser *hclparse.Parser, def
 	return finalVars, diags
 }
 
-// buildInitialContext remains the same
 func (m *Module) buildInitialContext(ctx context.Context) hcl.Diagnostics {
 	var diags hcl.Diagnostics
 	m.logger.Debugf(ctx, "Building initial evaluation context")
@@ -347,14 +332,11 @@ func (m *Module) buildInitialContext(ctx context.Context) hcl.Diagnostics {
 	return diags
 }
 
-// Helper still needed for EvaluateBlock? Only if EvaluateBlock needs hcl.Block
 func syntaxBlockToHclBlock(syntaxBlock *hclsyntax.Block, parentBody hcl.Body) *hcl.Block {
-	// Find the corresponding hcl.Block using PartialContent again based on type and labels
 	schema := &hcl.BodySchema{Blocks: []hcl.BlockHeaderSchema{{Type: syntaxBlock.Type, LabelNames: syntaxBlock.Labels}}}
 	content, _, _ := parentBody.PartialContent(schema) // Ignore diags for this helper
 
 	for _, b := range content.Blocks {
-		// Match based on type, labels and start position
 		if b.Type == syntaxBlock.Type && len(b.Labels) == len(syntaxBlock.Labels) && b.DefRange.Start == syntaxBlock.TypeRange.Start {
 			match := true
 			for i := range b.Labels {
@@ -368,7 +350,5 @@ func syntaxBlockToHclBlock(syntaxBlock *hclsyntax.Block, parentBody hcl.Body) *h
 			}
 		}
 	}
-	return nil // Could not find match
+	return nil
 }
-
-// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/module.go ---

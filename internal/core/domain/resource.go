@@ -6,10 +6,10 @@ type ResourceMetadata struct {
 	Kind               ResourceKind
 	ProviderType       string
 	ProviderAssignedID string
-	InternalID         string // Unique ID within this tool's run/context if needed
+	InternalID         string
 	SourceIdentifier   string // e.g., Terraform resource address like aws_instance.my_app
 	Region             string
-	AccountID          string // Optional, if available and useful
+	AccountID          string
 }
 
 //go:generate mockery --name=PlatformResource --output=./mocks --outpkg=mocks --case underscore

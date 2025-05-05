@@ -46,10 +46,9 @@ type defaultS3ResourceBuilder struct {
 	s3ClientFactory func(aws.Config) S3ClientInterface
 }
 
-// Build calls the underlying buildS3BucketResource function and returns its error.
 func (b *defaultS3ResourceBuilder) Build(ctx context.Context, bucketName, accountID string, cfg aws.Config, logger ports.Logger) (domain.PlatformResource, error) {
 	resource := buildS3BucketResource(ctx, bucketName, accountID, cfg, logger, b.s3ClientFactory)
-	return resource, resource.fetchErr // Return the resource and the captured build error
+	return resource, resource.fetchErr
 }
 
 func (r *s3BucketResource) Metadata() domain.ResourceMetadata { return r.meta }

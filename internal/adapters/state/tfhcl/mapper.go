@@ -54,7 +54,7 @@ func MapEvaluatedHCLToDomain(
 
 	meta := domain.ResourceMetadata{
 		Kind:             kind,
-		ProviderType:     providerType, // Use extracted provider type
+		ProviderType:     providerType,
 		SourceIdentifier: address,
 	}
 

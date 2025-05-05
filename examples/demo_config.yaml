@@ -15,10 +15,8 @@ platform:
     region: "eu-west-1"
     use_shared_credentials: false
     profile: "default"  # Added back as it's required by config validation
-    # Still prioritizing environment variables over this profile
 
 matching:
-  # Use tag-based matching for reliable resource identification
   strategy: tag
   tag:
     key: "TFResourceAddress"
@@ -33,11 +31,9 @@ resources:
     attributes:
       - instance_type
       - tags
-      # Removed security_groups to avoid false positives
       - disable_api_termination
   - kind: StorageBucket
     attributes:
       - tags
       - versioning
-      # Removed policy to avoid false positives
       - objects

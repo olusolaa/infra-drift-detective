@@ -14,7 +14,6 @@ import (
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 )
 
-// raw‑state structures ‑‑ only the fields we need
 type (
 	State struct {
 		Version          int        `json:"version"`
@@ -101,9 +100,6 @@ func (sp *stateParser) parseAndCache(ctx context.Context) (*State, error) {
 	return sp.stateCache, nil
 }
 
-// -----------------------------------------------------------------------------
-// queries
-// -----------------------------------------------------------------------------
 func findResourcesInState(
 	state *State,
 	kind domain.ResourceKind,

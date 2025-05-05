@@ -1,9 +1,7 @@
-// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/variables.go ---
-
 package evaluator
 
 import (
-	"context" // Keep context even if not used directly in helpers
+	"context"
 	"github.com/hashicorp/hcl/v2/hclparse"
 	"os"
 	"strings"
@@ -14,24 +12,19 @@ import (
 	"github.com/zclconf/go-cty/cty/convert"
 )
 
-// Schema only for attributes *within* a variable block
 var variableBlockSchema = &hcl.BodySchema{
 	Attributes: []hcl.AttributeSchema{
 		{Name: "description"},
 		{Name: "default"},
 		{Name: "sensitive"},
-		// Allow 'type' attribute but don't strictly require/process it via schema
 		{Name: "type", Required: false},
 	},
-	// No Blocks expected inside a variable block per standard HCL
 }
 
 func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
-	// Use the schema specifically for variable block content
 	content, contentDiags := block.Body.Content(variableBlockSchema)
 	diags = append(diags, contentDiags...)
-	// If the schema itself fails (e.g., unexpected nested block), treat as fatal for this var
 	if DiagsHasFatalErrors(contentDiags) {
 		return nil, diags
 	}
@@ -40,10 +33,8 @@ func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics
 		Name:      block.Labels[0],
 		FilePath:  block.DefRange.Filename,
 		DeclRange: block.DefRange,
-		Type:      cty.DynamicPseudoType, // Default to dynamic
+		Type:      cty.DynamicPseudoType,
 	}
-
-	// REMOVED all logic trying to parse or decode the 'type' attribute expression
 
 	if attr, exists := content.Attributes["description"]; exists {
 		descVal, descDiags := attr.Expr.Value(nil)
@@ -78,7 +69,6 @@ func decodeVariableBlock(block *hcl.Block) (*VariableDefinition, hcl.Diagnostics
 	return def, diags
 }
 
-// loadVarsFromFile remains the same
 func loadVarsFromFile(ctx context.Context, parser *hclparse.Parser, path string, logger ports.Logger) (map[string]cty.Value, hcl.Diagnostics, map[string]hcl.Range) {
 	vars := make(map[string]cty.Value)
 	var diags hcl.Diagnostics
@@ -137,7 +127,6 @@ func loadVarsFromFile(ctx context.Context, parser *hclparse.Parser, path string,
 	return vars, diags, attrRanges
 }
 
-// convertVarType remains the same
 func convertVarType(val cty.Value, targetType cty.Type, subjectRange hcl.Range) (cty.Value, hcl.Diagnostics) {
 	var diags hcl.Diagnostics
 	if targetType == cty.DynamicPseudoType || !val.IsKnown() { // Don't convert if target is dynamic or value unknown
@@ -151,5 +140,3 @@ func convertVarType(val cty.Value, targetType cty.Type, subjectRange hcl.Range) 
 	}
 	return convVal, diags
 }
-
-// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/variables.go ---

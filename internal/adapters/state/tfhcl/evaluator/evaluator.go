@@ -1,5 +1,3 @@
-// --- START OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/evaluator.go ---
-
 package evaluator
 
 import (
@@ -12,8 +10,6 @@ import (
 )
 
 type EvaluatedResource map[string]any
-
-// REMOVED permissiveBlockContentSchema
 
 func EvaluateBlock(
 	ctx context.Context,
@@ -35,10 +31,8 @@ func EvaluateBlock(
 	evaluatedContent := make(EvaluatedResource)
 	var allDiags hcl.Diagnostics
 
-	// Process Attributes directly using JustAttributes
 	attrs, attrDiags := block.Body.JustAttributes()
 	allDiags = append(allDiags, attrDiags...)
-	// Check for fatal errors *parsing* attributes definition
 	if DiagsHasFatalErrors(allDiags) {
 		blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: allDiags}, "Fatal errors parsing attributes, stopping evaluation")
 		return nil, allDiags
@@ -51,7 +45,6 @@ func EvaluateBlock(
 		}
 		attrLogger := blockLogger.WithFields(map[string]any{"attribute": name})
 		val, valEvalDiags := attr.Expr.Value(evalCtx)
-		// Filter unsupported *evaluation* errors if needed, but usually eval errors are real errors
 		filteredValEvalDiags := filterUnsupportedDiags(valEvalDiags)
 		allDiags = append(allDiags, filteredValEvalDiags...)
 
@@ -73,7 +66,6 @@ func EvaluateBlock(
 		evaluatedContent[name] = goVal
 	}
 
-	// Process Nested Blocks using syntaxBody iteration
 	syntaxBody, ok := block.Body.(*hclsyntax.Body)
 	if !ok {
 		blockLogger.Warnf(ctx, "Could not cast block body to syntax body, skipping nested block evaluation")
@@ -85,7 +77,6 @@ func EvaluateBlock(
 				return evaluatedContent, allDiags
 			}
 
-			// Convert syntax block back to hcl.Block for recursive call
 			hclNestedBlock := syntaxBlockToHclBlock(nestedSyntaxBlock, block.Body)
 			if hclNestedBlock == nil {
 				blockLogger.Warnf(ctx, "Failed to convert syntax block %s back to hcl.Block, skipping", nestedSyntaxBlock.Type)
@@ -120,7 +111,6 @@ func EvaluateBlock(
 		}
 	}
 
-	// Return nil content if fatal errors occurred ANYWHERE during evaluation
 	if DiagsHasFatalErrors(allDiags) {
 		blockLogger.Errorf(ctx, &HCLDiagnosticsError{Diags: allDiags}, "Errors encountered during block evaluation")
 		return nil, allDiags
@@ -132,7 +122,6 @@ func EvaluateBlock(
 	return evaluatedContent, allDiags
 }
 
-// filterUnsupportedDiags remains the same
 func filterUnsupportedDiags(diags hcl.Diagnostics) hcl.Diagnostics {
 	if len(diags) == 0 {
 		return diags
@@ -147,5 +136,3 @@ func filterUnsupportedDiags(diags hcl.Diagnostics) hcl.Diagnostics {
 	}
 	return filteredDiags
 }
-
-// --- END OF FILE infra-drift-detector/internal/adapters/state/tfhcl/evaluator/evaluator.go ---

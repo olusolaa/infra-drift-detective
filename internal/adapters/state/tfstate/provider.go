@@ -21,10 +21,9 @@ type Config struct {
 }
 
 func NewProvider(cfg Config, logger ports.Logger) (*Provider, error) {
-	// If FilePath is empty, use a default
 	filePath := cfg.FilePath
 	if filePath == "" {
-		filePath = "terraform.tfstate" // Only use default if not specified in config
+		filePath = "terraform.tfstate"
 		logger.Debugf(nil, "No state file path specified, using default: %s", filePath)
 	}
 
@@ -41,9 +40,6 @@ func NewProvider(cfg Config, logger ports.Logger) (*Provider, error) {
 
 func (p *Provider) Type() string { return ProviderTypeTFState }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// ListResources – returns *every instance* of the requested kind.
-// ──────────────────────────────────────────────────────────────────────────────
 func (p *Provider) ListResources(
 	ctx context.Context,
 	kind domain.ResourceKind,
@@ -81,9 +77,6 @@ func (p *Provider) ListResources(
 	return results, nil
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// GetResource – first instance matching "type.name" (e.g. aws_s3_bucket.logs).
-// ──────────────────────────────────────────────────────────────────────────────
 func (p *Provider) GetResource(
 	ctx context.Context,
 	kind domain.ResourceKind,

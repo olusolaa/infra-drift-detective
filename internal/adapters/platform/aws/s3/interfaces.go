@@ -6,17 +6,14 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
-	// "github.com/aws/aws-sdk-go-v2/service/sts" // No longer needed here
 	"github.com/olusolaa/infra-drift-detector/internal/core/domain"
 	"github.com/olusolaa/infra-drift-detector/internal/core/ports"
 )
 
 //go:generate mockery --name S3ClientInterface --output ./mocks --outpkg mocks --case underscore
 //go:generate mockery --name S3ResourceBuilder --output ./mocks --outpkg mocks --case underscore
-// STSClientInterface moved to internal/adapters/platform/aws/interfaces.go
 
 // S3ClientInterface defines the methods needed from the AWS SDK S3 client.
-// This helps in mocking the S3 client for unit tests.
 type S3ClientInterface interface {
 	ListBuckets(ctx context.Context, params *s3.ListBucketsInput, optFns ...func(*s3.Options)) (*s3.ListBucketsOutput, error)
 	HeadBucket(ctx context.Context, params *s3.HeadBucketInput, optFns ...func(*s3.Options)) (*s3.HeadBucketOutput, error)
@@ -36,8 +33,3 @@ type S3ClientInterface interface {
 type S3ResourceBuilder interface {
 	Build(ctx context.Context, bucketName, accountID string, cfg aws.Config, logger ports.Logger) (domain.PlatformResource, error)
 }
-
-// S3ClientFactory creates S3 clients for different regions - // Keep internal? Or make general?
-// type S3ClientFactory interface {
-// 	CreateS3Client(cfg aws.Config, region string) S3ClientInterface
-// }
