@@ -21,7 +21,7 @@ import (
 const ReporterTypeText = "text"
 
 type Config struct {
-	NoColor bool `yaml:"no_color"`
+	NoColor bool `yaml:"no_color" mapstructure:"no_color"`
 }
 
 type Reporter struct {

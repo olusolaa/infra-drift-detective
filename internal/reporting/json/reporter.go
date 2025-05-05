@@ -15,7 +15,7 @@ import (
 const ReporterTypeJSON = "json"
 
 type Config struct {
-	// PrettyPrint bool `yaml:"pretty_print"` // Future option for non-indented JSON
+	// PrettyPrint bool `yaml:"pretty_print" mapstructure:"pretty_print"` // Future option for non-indented JSON
 }
 
 type Reporter struct {

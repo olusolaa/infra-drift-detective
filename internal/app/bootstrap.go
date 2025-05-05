@@ -2,10 +2,7 @@ package app
 
 import (
 	"context"
-	stderrs "errors"
 	"fmt"
-	awsshared "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/shared"
-	"github.com/olusolaa/infra-drift-detector/internal/reporting/json"
 	"os"
 	"strings"
 
@@ -15,6 +12,7 @@ import (
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/matching/tag"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/limiter"
+	awsshared "github.com/olusolaa/infra-drift-detector/internal/adapters/platform/aws/shared"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfhcl"
 	"github.com/olusolaa/infra-drift-detector/internal/adapters/state/tfstate"
 	"github.com/olusolaa/infra-drift-detector/internal/config"
@@ -23,8 +21,10 @@ import (
 	"github.com/olusolaa/infra-drift-detector/internal/core/service"
 	"github.com/olusolaa/infra-drift-detector/internal/errors"
 	"github.com/olusolaa/infra-drift-detector/internal/log"
+	jsonreport "github.com/olusolaa/infra-drift-detector/internal/reporting/json"
 	"github.com/olusolaa/infra-drift-detector/internal/reporting/text"
 	"github.com/olusolaa/infra-drift-detector/internal/resources/compute"
+	"github.com/olusolaa/infra-drift-detector/internal/resources/storage"
 )
 
 type Application struct {
@@ -36,7 +36,7 @@ func BuildApplication(ctx context.Context, v *viper.Viper) (*Application, error)
 	cfg, err := initConfig(ctx, v)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "FATAL: Configuration failed: %v\n", err)
-		if appErr := (*errors.AppError)(nil); stderrs.As(err, &appErr) && appErr.IsUserFacing {
+		if appErr := (*errors.AppError)(nil); errors.As(err, &appErr) && appErr.IsUserFacing {
 			fmt.Fprintf(os.Stderr, "Details: %s\n", appErr.Message)
 			if appErr.SuggestedAction != "" {
 				fmt.Fprintf(os.Stderr, "Suggestion: %s\n", appErr.SuggestedAction)
@@ -249,13 +249,13 @@ func initReporter(ctx context.Context, cfg *config.Config, logger ports.Logger) 
 		if err == nil {
 			reportLog.Infof(ctx, "Using Text reporter (Color: %t)", !reporterCfg.NoColor)
 		}
-	case json.ReporterTypeJSON:
+	case jsonreport.ReporterTypeJSON:
 		reporterCfg := cfg.Settings.Reporter.JSON
 		if reporterCfg == nil {
 			reporterCfg = config.DefaultConfig().Settings.Reporter.JSON
 		}
-		reportLog := logger.WithFields(map[string]any{"component": "reporter", "type": json.ReporterTypeJSON})
-		reporter, err = json.NewReporter(*reporterCfg, reportLog)
+		reportLog := logger.WithFields(map[string]any{"component": "reporter", "type": jsonreport.ReporterTypeJSON})
+		reporter, err = jsonreport.NewReporter(*reporterCfg, reportLog)
 		if err == nil {
 			reportLog.Infof(ctx, "Using JSON reporter")
 		}
@@ -275,6 +275,13 @@ func initComparers(ctx context.Context, registry *service.ComponentRegistry, log
 		return errors.Wrap(err, errors.CodeInternal, "failed to register ComputeInstance comparer")
 	}
 	logger.Debugf(ctx, "Registered comparer for: %s", computeComparer.Kind())
+
+	storageBucketComparer := storage.NewBucketComparer()
+	err = registry.RegisterResourceComparer(storageBucketComparer)
+	if err != nil {
+		return errors.Wrap(err, errors.CodeInternal, "failed to register StorageBucket comparer")
+	}
+	logger.Debugf(ctx, "Registered comparer for: %s", storageBucketComparer.Kind())
 
 	return nil
 }
