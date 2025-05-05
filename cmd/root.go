@@ -77,6 +77,7 @@ func init() {
 
 	viper.BindPFlag("settings.log_level", rootCmd.PersistentFlags().Lookup("log-level"))
 	viper.BindPFlag("settings.log_format", rootCmd.PersistentFlags().Lookup("log-format"))
+	viper.BindPFlag("attributes", rootCmd.PersistentFlags().Lookup("attributes"))
 
 	viper.SetEnvPrefix("DRIFT")
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
